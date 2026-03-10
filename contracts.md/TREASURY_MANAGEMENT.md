@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Treasury Management contract is a core component of the Amana Chain Entities platform. It handles all financial transactions for SACCO entities, including contributions, withdrawals, and loans. This contract ensures transparent fund management with multi-signature approval mechanisms and maintains an immutable record of all financial activities.
+The Treasury Management contract is a core component of the Sociale platform. It handles all financial transactions for cooperative entities, including contributions, withdrawals, and loans. This contract ensures transparent fund management with multi-signature approval mechanisms and maintains an immutable record of all financial activities.
 
 ## Core Functionality
 
@@ -163,7 +163,7 @@ To execute or cancel transactions:
 
 ## Integration with Other Contracts
 
-The Treasury Management contract is designed to work alongside other Amana CE contracts:
+The Treasury Management contract is designed to work alongside other Sociale smart contracts:
 
 - **Entity Registry Contract** - Used to verify member identity and authorization
 - **Governance Contract** - May trigger treasury transactions based on approved proposals

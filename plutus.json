@@ -1,7 +1,7 @@
 {
   "preamble": {
-    "title": "amanace/amana-contracts",
-    "description": "Aiken contracts for project 'amanace/amana-contracts'",
+    "title": "socialefintech/sociale-sc",
+    "description": "Aiken smart contracts for the Sociale platform",
     "version": "0.0.0",
     "plutusVersion": "v3",
     "compiler": {

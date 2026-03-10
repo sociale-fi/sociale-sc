@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Governance contract is a fundamental component of the Amana Chain Entities platform. It manages the decision-making process for SACCO entities, enabling members to create proposals, vote on them, and automatically execute approved decisions. The contract ensures transparent and fair governance with immutable record-keeping of all voting activities.
+The Governance contract is a fundamental component of the Sociale platform. It manages the decision-making process for cooperative entities, enabling members to create proposals, vote on them, and automatically execute approved decisions. The contract ensures transparent and fair governance with immutable record-keeping of all voting activities.
 
 ## Core Functionality
 
@@ -238,7 +238,7 @@ To update governance parameters:
 
 ## Integration with Other Contracts
 
-The Governance contract is designed to work alongside other Amana CE contracts:
+The Governance contract is designed to work alongside other Sociale smart contracts:
 
 - **Entity Registry Contract** - Used to verify member identity and admin status
 - **Treasury Management Contract** - Target of treasury action proposals

@@ -129,7 +129,7 @@ To add or remove admins:
 
 ## Integration with Other Contracts
 
-The Entity Registry is designed to work alongside other Amana CE contracts:
+The Entity Registry is designed to work alongside other Sociale smart contracts:
 
 - **Treasury Management Contract** - Verifies member identity by consulting the Entity Registry
 - **Governance Contract** - Checks admin permissions and member eligibility for voting

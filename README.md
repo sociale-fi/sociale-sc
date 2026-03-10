@@ -1,18 +1,18 @@
-# Amana Chain Entities
+# Sociale Smart Contracts
 
-A blockchain-based platform that transforms SACCO operations through transparent governance and decentralized finance solutions built on Cardano.
+Cardano smart contracts powering transparent governance and decentralized financial operations for savings cooperatives (SACCOs, stokvels, and chamas) on the Sociale platform.
 
 ## Overview
 
-Amana Chain Entities (Amana CE) addresses key challenges facing Savings and Credit Cooperative Organizations (SACCOs):
+These contracts address the core trust and accountability challenges facing savings cooperatives:
 
-- **Funds Mismanagement** - Through transparent blockchain transactions
-- **Poor Governance** - With decentralized decision-making
-- **Limited Access** - Eliminating geographical constraints
+- **Funds Mismanagement** - Through transparent, on-chain financial transactions
+- **Poor Governance** - With decentralised, tamper-proof decision-making
+- **Limited Access** - Eliminating geographical constraints for diaspora and cross-border members
 
 ## Smart Contract Architecture
 
-Our platform consists of three interconnected smart contracts:
+Three interconnected validators form the foundation of the on-chain layer:
 
 ```
 ┌──────────────────┐    ┌───────────────────┐    ┌──────────────────┐
@@ -27,17 +27,17 @@ Our platform consists of three interconnected smart contracts:
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Entity Registry**: Manages SACCO entities and their members
+- **Entity Registry**: Manages cooperative entities and their members
 - **Treasury Management**: Handles financial operations with multi-signature approval
 - **Governance**: Facilitates decision-making through proposals and voting
 
 ## Documentation
 
-Detailed documentation is available in the `/documentation` directory:
+Detailed documentation is available in the `/contracts.md` directory:
 
-- [Entity Registry](./documentation/ENTITY_REGISTRY.md)
-- [Treasury Management](./documentation/TREASURY_MANAGEMENT.md)
-- [Governance](./documentation/GOVERNANCE.md)
+- [Entity Registry](./contracts.md/ENTITY_REGISTRY.md)
+- [Treasury Management](./contracts.md/TREASURY_MANAGEMENT.md)
+- [Governance](./contracts.md/GOVERNANCE.md)
 
 ## Getting Started
 
@@ -59,7 +59,7 @@ aiken check
 ## Key Features
 
 ### Entity Registry
-- SACCO entity creation and management
+- Cooperative entity creation and management
 - Member registration with status tracking
 - Admin management with multi-admin support
 
@@ -76,7 +76,7 @@ aiken check
 ## Project Structure
 
 ```
-amana-contracts/
+sociale-sc/
 ├── aiken.toml               # Project configuration
 ├── lib/                     # Shared library code
 │   ├── entity_registry/     # Entity Registry types
@@ -86,7 +86,7 @@ amana-contracts/
 │   ├── entity_registry/     # Entity Registry contract
 │   ├── governance/          # Governance contract
 │   └── treasury_management/ # Treasury Management contract
-└── documentation/           # Detailed documentation
+└── contracts.md/            # Detailed documentation
 ```
 
 ## License

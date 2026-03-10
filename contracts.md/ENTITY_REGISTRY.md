@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Entity Registry validator is a fundamental component of the Amana Chain Entities platform. It serves as the identity layer that manages SACCO entities and their members on the Cardano blockchain. This document provides an overview of its implementation, functionality, and usage guidelines.
+The Entity Registry validator is a fundamental component of the Sociale platform. It serves as the on-chain identity layer that manages cooperative entities and their members on the Cardano blockchain. This document provides an overview of its implementation, functionality, and usage guidelines.
 
 ## Core Functionality
 

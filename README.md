@@ -1,92 +1,69 @@
 # Sociale Smart Contracts
 
-Cardano smart contracts powering transparent governance and decentralized financial operations for savings cooperatives (SACCOs, stokvels, and chamas) on the Sociale platform.
+Cardano smart contracts for transparent governance and financial operations in savings cooperatives — SACCOs, stokvels, chamas, and similar member-owned financial groups.
 
-## Overview
+Built with [Aiken](https://aiken-lang.org) targeting Plutus v3.
 
-These contracts address the core trust and accountability challenges facing savings cooperatives:
+---
 
-- **Funds Mismanagement** - Through transparent, on-chain financial transactions
-- **Poor Governance** - With decentralised, tamper-proof decision-making
-- **Limited Access** - Eliminating geographical constraints for diaspora and cross-border members
+## What this does
 
-## Smart Contract Architecture
+Savings cooperatives face a recurring set of trust problems: funds can be mismanaged, governance decisions can be made without accountability, and members — especially diaspora — have limited visibility into the group's operations.
 
-Three interconnected validators form the foundation of the on-chain layer:
+These contracts address that directly. Every material action a cooperative takes — admitting a member, approving a withdrawal, passing a governance vote, committing a batch of transactions — is recorded on Cardano with cryptographic guarantees. No central authority can silently alter the record.
 
-```
-┌──────────────────┐    ┌───────────────────┐    ┌──────────────────┐
-│  Entity Registry │    │     Treasury      │    │    Governance    │
-│    Contract      │◄───┤    Management     │◄───┤     Contract     │
-│                  │    │     Contract      │    │                  │
-└────────┬─────────┘    └─────────┬─────────┘    └────────┬─────────┘
-         │                        │                       │
-         ▼                        ▼                       ▼
-┌────────────────────────────────────────────────────────────────────┐
-│                           Cardano Blockchain                        │
-└────────────────────────────────────────────────────────────────────┘
-```
+## Contracts
 
-- **Entity Registry**: Manages cooperative entities and their members
-- **Treasury Management**: Handles financial operations with multi-signature approval
-- **Governance**: Facilitates decision-making through proposals and voting
+| Contract | Description |
+|----------|-------------|
+| [Audit Anchor](./docs/AUDIT_ANCHOR.md) | Merkle root commitments forming a tamper-evident transaction history |
+| [Entity Registry](./docs/contracts/ENTITY_REGISTRY.md) | Cooperative identity, member roster, and admin keys |
+| [Governance](./docs/contracts/GOVERNANCE.md) | Proposals, voting, quorum, and parameter management |
+| [Treasury Management](./docs/contracts/TREASURY_MANAGEMENT.md) | Multi-signature fund management |
 
-## Documentation
+Each cooperative is represented by a set of independent UTxOs — one per contract. Multiple cooperatives coexist at the same script addresses.
 
-Detailed documentation is available in the `/contracts.md` directory:
+## Identity
 
-- [Entity Registry](./contracts.md/ENTITY_REGISTRY.md)
-- [Treasury Management](./contracts.md/TREASURY_MANAGEMENT.md)
-- [Governance](./contracts.md/GOVERNANCE.md)
+Members can link a [KERI](https://keri.one) Autonomic Identifier (AID) to their on-chain record. KERI provides self-sovereign identity that is not bound to any single blockchain. With the Cardano Foundation's [`cardano-backer`](https://github.com/cardano-foundation/cardano-backer) tool, KERI Key Event Logs can be anchored directly on Cardano, making the identity chain independently verifiable on-ledger.
 
-## Getting Started
+See [KERI_INTEGRATION.md](./docs/KERI_INTEGRATION.md) for details.
 
-### Requirements
+## Getting started
 
-- Aiken v1.1.15 or higher
-- Cardano development environment
-
-### Build and Test
+Requires Aiken v1.1.15 or higher.
 
 ```bash
-# Build the contracts
-aiken build
-
-# Run the test suite
+# Type-check and run all tests
 aiken check
+
+# Compile and generate plutus.json
+aiken build
 ```
 
-## Key Features
-
-### Entity Registry
-- Cooperative entity creation and management
-- Member registration with status tracking
-- Admin management with multi-admin support
-
-### Treasury Management
-- Transparent fund management
-- Multi-signature transaction approval
-- Comprehensive transaction history
-
-### Governance
-- Proposal creation and management
-- Transparent voting system
-- Automatic execution of approved decisions
-
-## Project Structure
+## Project layout
 
 ```
 sociale-sc/
-├── aiken.toml               # Project configuration
-├── lib/                     # Shared library code
-│   ├── entity_registry/     # Entity Registry types
-│   ├── governance/          # Governance types
-│   └── treasury_management/ # Treasury Management types
-├── validators/              # Smart contracts
-│   ├── entity_registry/     # Entity Registry contract
-│   ├── governance/          # Governance contract
-│   └── treasury_management/ # Treasury Management contract
-└── contracts.md/            # Detailed documentation
+├── docs/
+│   ├── ARCHITECTURE.md          # System design and UTxO model
+│   ├── AUDIT_ANCHOR.md          # Verifiable audit trail specification
+│   ├── KERI_INTEGRATION.md      # KERI identity and cardano-backer
+│   ├── ROADMAP.md               # Current state and direction
+│   └── contracts/               # Per-contract reference documentation
+├── lib/                         # Shared types and utilities
+│   ├── audit_anchor/
+│   ├── entity_registry/
+│   ├── governance/
+│   ├── member_nft/
+│   └── treasury_management/
+├── validators/                  # Contract implementations and tests
+│   ├── audit_anchor/
+│   ├── entity_registry/
+│   ├── governance/
+│   ├── member_nft/
+│   └── treasury_management/
+└── legacy/                      # Archived competition submission (reference only)
 ```
 
 ## License

@@ -1,28 +1,108 @@
 // validators/governance/governance.ak
+//
+// Governance validator for cooperative on-chain decision-making.
+//
+// Supports the full proposal lifecycle: create, vote, execute, cancel, and
+// parameter updates. Parameterised by the entity registry script hash and
+// treasury script hash for cross-contract category validation.
+
 use aiken/collection/list
-use cardano/transaction.{InlineDatum, OutputReference, Transaction}
+use aiken/crypto.{VerificationKeyHash}
+use aiken/interval.{Finite}
+use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use governance/types.{
   GovernanceAction, GovernanceDatum, GovernanceParams, Proposal,
   ProposalCategory, ProposalStatus, Vote,
 }
 
-/// This helper function explicitly uses the ProposalCategory type to prevent
-/// unused import warnings
-fn is_valid_category(category: ProposalCategory) -> Bool {
-  when category is {
-    ProposalCategory.TreasuryAction -> True
-    ProposalCategory.ParameterChange -> True
-    ProposalCategory.MembershipChange -> True
-    ProposalCategory.Other -> True
+// ── Time ─────────────────────────────────────────────────────────────────────
+
+fn get_current_time(tx: Transaction) -> Int {
+  when tx.validity_range.lower_bound.bound_type is {
+    Finite(t) -> t
+    _ -> 0
   }
 }
 
-/// Governance validator
-/// 
-/// This validator manages the decision-making process for a SACCO entity. It
-/// enables members to create proposals, vote on them, and automatically execute
-/// approved decisions. The contract ensures transparent and fair governance with
-/// immutable record-keeping of all voting activities.
+// ── Output helpers ────────────────────────────────────────────────────────────
+
+fn get_updated_datum(outputs: List<Output>) -> Option<GovernanceDatum> {
+  let inline_outputs =
+    list.filter(
+      outputs,
+      fn(o) {
+        when o.datum is {
+          InlineDatum(_) -> True
+          _ -> False
+        }
+      },
+    )
+  when inline_outputs is {
+    [output] ->
+      when output.datum is {
+        InlineDatum(data) -> {
+          expect datum: GovernanceDatum = data
+          Some(datum)
+        }
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+// ── Authorisation ─────────────────────────────────────────────────────────────
+
+fn is_signed_by_any_admin(
+  signatories: List<VerificationKeyHash>,
+  admins: List<VerificationKeyHash>,
+) -> Bool {
+  list.any(admins, fn(admin) { list.has(signatories, admin) })
+}
+
+// ── Parameter validation ──────────────────────────────────────────────────────
+
+fn valid_params(p: GovernanceParams) -> Bool {
+  let valid_threshold = p.approval_threshold > 50 && p.approval_threshold <= 100
+  let valid_period = p.minimum_voting_period > 0
+  let valid_quorum = p.quorum_percentage > 0 && p.quorum_percentage <= 100
+  valid_threshold && valid_period && valid_quorum
+}
+
+// ── Quorum and approval checks ────────────────────────────────────────────────
+
+fn quorum_met(proposal: Proposal, datum: GovernanceDatum) -> Bool {
+  let total_votes =
+    proposal.for_votes + proposal.against_votes + proposal.abstain_votes
+  // total_votes must represent at least quorum_percentage% of member_count
+  if datum.member_count > 0 {
+    total_votes * 100 >= datum.params.quorum_percentage * datum.member_count
+  } else {
+    total_votes > 0
+  }
+}
+
+fn approval_threshold_met(proposal: Proposal, datum: GovernanceDatum) -> Bool {
+  let total_votes =
+    proposal.for_votes + proposal.against_votes + proposal.abstain_votes
+  if total_votes > 0 {
+    proposal.for_votes * 100 / total_votes >= datum.params.approval_threshold
+  } else {
+    False
+  }
+}
+
+// ── Invariant checks ──────────────────────────────────────────────────────────
+
+/// Verify the non-proposal fields of the datum are unchanged between two states.
+fn refs_and_params_unchanged(
+  new_datum: GovernanceDatum,
+  old_datum: GovernanceDatum,
+) -> Bool {
+  new_datum.entity_utxo_ref == old_datum.entity_utxo_ref && new_datum.treasury_utxo_ref == old_datum.treasury_utxo_ref && new_datum.params == old_datum.params && new_datum.next_proposal_id == old_datum.next_proposal_id && new_datum.member_count == old_datum.member_count && new_datum.admins == old_datum.admins
+}
+
+// ── Validator ─────────────────────────────────────────────────────────────────
+
 validator governance(
   entity_registry_hash: ByteArray,
   treasury_hash: ByteArray,
@@ -33,13 +113,11 @@ validator governance(
     _own_ref: OutputReference,
     tx: Transaction,
   ) {
-    // Extract transaction signatories
+    let current_time = get_current_time(tx)
     let Transaction { extra_signatories, outputs, .. } = tx
 
-    // Process based on the presence of existing datum
     when datum_opt is {
       Some(datum) ->
-        // Verify authorization based on redeemer action
         when redeemer is {
           GovernanceAction.CreateProposal {
             title,
@@ -48,108 +126,58 @@ validator governance(
             voting_deadline,
             execution_data,
           } -> {
-            // 1. Ensure valid proposal details
-            let valid_title = title != ""
-            let valid_description = description != ""
-            // Verify category is a valid ProposalCategory (uses the imported type)
-            let valid_category = is_valid_category(category)
-            // 2. Ensure transaction is signed by at least one key (proposer)
+            let valid_title = title != #""
+            let valid_description = description != #""
             let has_signer = list.length(extra_signatories) > 0
-            expect Some(proposer) = list.head(extra_signatories)
-            // 3. Verify voting deadline is sufficiently in the future
-            // For a real implementation, you would compare with tx.validity_range lower bound
-            let current_time = 0
-            // Placeholder timestamp
-            let minimum_voting_period = datum.params.minimum_voting_period
             let valid_deadline =
-              voting_deadline > current_time + minimum_voting_period
-            // 4. Find outputs with inline datum (should be exactly one for the updated governance state)
-            let outputs_with_inline_datum =
-              list.filter(
-                outputs,
-                fn(output) {
-                  when output.datum is {
-                    InlineDatum(_) -> True
-                    _ -> False
-                  }
-                },
-              )
-            // 5. Verify that we have exactly one output with datum
-            when outputs_with_inline_datum is {
-              [output] ->
-                // 6. Verify the output datum is correctly updated
-                when output.datum is {
-                  InlineDatum(data) -> {
-                    expect new_datum: GovernanceDatum = data
-                    // 7. Verify entity and treasury references remain unchanged
-                    let entity_ref_unchanged =
-                      new_datum.entity_utxo_ref == datum.entity_utxo_ref
-                    let treasury_ref_unchanged =
-                      new_datum.treasury_utxo_ref == datum.treasury_utxo_ref
-                    // 8. Verify governance parameters remain unchanged
-                    let params_unchanged = new_datum.params == datum.params
-                    // 9. Verify proposals list grows by exactly one
-                    let proposals_grew_by_one =
-                      list.length(new_datum.proposals) == list.length(
-                        datum.proposals,
-                      ) + 1
-                    // 10. Verify the new proposal ID
-                    let next_id = datum.next_proposal_id
-                    let next_id_incremented =
-                      new_datum.next_proposal_id == next_id + 1
-                    // 11. Verify all previous proposals are preserved
-                    let previous_proposals_preserved =
-                      list.all(
-                        datum.proposals,
-                        fn(old_proposal) {
-                          list.any(
-                            new_datum.proposals,
-                            fn(new_proposal) { old_proposal == new_proposal },
-                          )
-                        },
-                      )
-                    // 12. Verify the new proposal is correctly added
-                    let new_proposal_valid =
-                      list.any(
-                        new_datum.proposals,
-                        fn(proposal) {
-                          proposal.title == title && proposal.description == description && proposal.category == category && proposal.proposer == proposer && proposal.creation_time >= 0 && proposal.voting_deadline == voting_deadline && proposal.execution_data == execution_data && // Using execution_data here
-                          proposal.status == ProposalStatus.Active && list.is_empty(
-                            proposal.votes,
-                          ) && proposal.for_votes == 0 && proposal.against_votes == 0 && proposal.abstain_votes == 0
-                        },
-                      )
-                    // All conditions must be met
-                    valid_title? && valid_description? && valid_category? && has_signer? && valid_deadline? && entity_ref_unchanged? && treasury_ref_unchanged? && params_unchanged? && proposals_grew_by_one? && next_id_incremented? && previous_proposals_preserved? && new_proposal_valid?
-                  }
-                  _ -> False
-                }
-              _ -> False
+              voting_deadline > current_time + datum.params.minimum_voting_period
+
+            expect Some(proposer) = list.head(extra_signatories)
+
+            when get_updated_datum(outputs) is {
+              Some(new_datum) -> {
+                let refs_unchanged = refs_and_params_unchanged(new_datum, datum)
+                let proposals_grew =
+                  list.length(new_datum.proposals) == list.length(
+                    datum.proposals,
+                  ) + 1
+                let id_incremented =
+                  new_datum.next_proposal_id == datum.next_proposal_id + 1
+                let prior_preserved =
+                  list.all(
+                    datum.proposals,
+                    fn(p) { list.has(new_datum.proposals, p) },
+                  )
+                let new_proposal_valid =
+                  list.any(
+                    new_datum.proposals,
+                    fn(p) {
+                      p.title == title && p.description == description && p.category == category && p.proposer == proposer && p.voting_deadline == voting_deadline && p.execution_data == execution_data && p.status == ProposalStatus.Active && list.is_empty(
+                        p.votes,
+                      ) && p.for_votes == 0 && p.against_votes == 0 && p.abstain_votes == 0
+                    },
+                  )
+                valid_title? && valid_description? && has_signer? && valid_deadline? && refs_unchanged? && proposals_grew? && id_incremented? && prior_preserved? && new_proposal_valid?
+              }
+              None -> False
             }
           }
+
           GovernanceAction.CastVote { proposal_id, vote } -> {
-            // Use the Vote type explicitly to ensure it's not marked as unused
-            let vote_type: Vote = vote
-            // 1. Ensure transaction is signed by at least one key (voter)
             let has_signer = list.length(extra_signatories) > 0
-            expect Some(voter) = list.head(extra_signatories)
-            // 2. Verify proposal_id is valid (within range of existing proposals)
             let valid_id =
               proposal_id >= 0 && proposal_id < list.length(datum.proposals)
-            if !valid_id {
+
+            if !has_signer || !valid_id {
               False
             } else {
-              // 3. Get the proposal being voted on
+              expect Some(voter) = list.head(extra_signatories)
               expect Some(proposal) = list.at(datum.proposals, proposal_id)
-              // 4. Check if the proposal is active
+
               let is_active = proposal.status == ProposalStatus.Active
-              // 5. Check if voting deadline hasn't passed using transaction's validity interval
-              // For production code, we would compare with tx.validity_range
-              // Simplified check for the MVP
-              let current_time = proposal.creation_time
-              // Use creation time as a base
+              // Voting window is open when the transaction's validity lower bound
+              // is at or before the proposal's voting deadline
               let voting_open = current_time <= proposal.voting_deadline
-              // 6. Check if voter has already voted
               let already_voted =
                 list.any(
                   proposal.votes,
@@ -158,394 +186,225 @@ validator governance(
                     voter_key == voter
                   },
                 )
+
               if !is_active || !voting_open || already_voted {
                 False
               } else {
-                // 7. Find outputs with inline datum (should be exactly one for the updated governance state)
-                let outputs_with_inline_datum =
-                  list.filter(
-                    outputs,
-                    fn(output) {
-                      when output.datum is {
-                        InlineDatum(_) -> True
-                        _ -> False
-                      }
-                    },
-                  )
-                when outputs_with_inline_datum is {
-                  [output] ->
-                    when output.datum is {
-                      InlineDatum(data) -> {
-                        expect new_datum: GovernanceDatum = data
-                        // 8. Verify entity and treasury references remain unchanged
-                        let entity_ref_unchanged =
-                          new_datum.entity_utxo_ref == datum.entity_utxo_ref
-                        let treasury_ref_unchanged =
-                          new_datum.treasury_utxo_ref == datum.treasury_utxo_ref
-                        // 9. Verify governance parameters remain unchanged
-                        let params_unchanged = new_datum.params == datum.params
-                        // 10. Verify proposals count remains the same
-                        let proposal_count_unchanged =
-                          list.length(new_datum.proposals) == list.length(
-                            datum.proposals,
-                          )
-                        // 11. Verify next proposal ID remains unchanged
-                        let next_id_unchanged =
-                          new_datum.next_proposal_id == datum.next_proposal_id
-                        // 12. Get the updated proposal
-                        expect Some(new_proposal) =
-                          list.at(new_datum.proposals, proposal_id)
-                        // 13. Check that all proposals except the voted one are unchanged
-                        let other_proposals_unchanged =
-                          list.all(
-                            list.range(0, list.length(datum.proposals)),
-                            fn(index) {
-                              if index == proposal_id {
-                                // Skip checking the proposal that should be changed
-                                True
-                              } else {
-                                // Other proposals should be unchanged
-                                expect Some(old) =
-                                  list.at(datum.proposals, index)
-                                expect Some(new) =
-                                  list.at(new_datum.proposals, index)
-                                old == new
-                              }
-                            },
-                          )
-                        // 14. Verify the proposal status remains Active
-                        let status_unchanged =
-                          new_proposal.status == ProposalStatus.Active
-                        // 15. Verify other proposal fields remain unchanged
-                        let core_fields_unchanged =
-                          new_proposal.title == proposal.title && new_proposal.description == proposal.description && new_proposal.category == proposal.category && new_proposal.proposer == proposal.proposer && new_proposal.creation_time == proposal.creation_time && new_proposal.voting_deadline == proposal.voting_deadline && new_proposal.execution_data == proposal.execution_data
-                        // 16. Verify the vote is correctly added
-                        let vote_count_increased =
-                          list.length(new_proposal.votes) == list.length(
-                            proposal.votes,
-                          ) + 1
-                        let has_new_vote =
-                          list.has(new_proposal.votes, Pair(voter, vote_type))
-                        let previous_votes_preserved =
-                          list.all(
-                            proposal.votes,
-                            fn(old_vote) {
-                              list.has(new_proposal.votes, old_vote)
-                            },
-                          )
-                        // 17. Verify vote tallies are correctly updated
-                        let tallies_correct =
-                          when vote_type is {
-                            Vote.For ->
-                              new_proposal.for_votes == proposal.for_votes + 1 && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes
-                            Vote.Against ->
-                              new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes + 1 && new_proposal.abstain_votes == proposal.abstain_votes
-                            Vote.Abstain ->
-                              new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes + 1
+                let vote_type: Vote = vote
+
+                when get_updated_datum(outputs) is {
+                  Some(new_datum) -> {
+                    let refs_unchanged =
+                      refs_and_params_unchanged(new_datum, datum)
+                    let count_unchanged =
+                      list.length(new_datum.proposals) == list.length(
+                        datum.proposals,
+                      )
+
+                    expect Some(new_proposal) =
+                      list.at(new_datum.proposals, proposal_id)
+
+                    let other_proposals_unchanged =
+                      list.all(
+                        list.range(0, list.length(datum.proposals)),
+                        fn(index) {
+                          if index == proposal_id {
+                            True
+                          } else {
+                            expect Some(old_p) = list.at(datum.proposals, index)
+                            expect Some(new_p) =
+                              list.at(new_datum.proposals, index)
+                            old_p == new_p
                           }
-                        // All conditions must be met
-                        has_signer? && entity_ref_unchanged? && treasury_ref_unchanged? && params_unchanged? && proposal_count_unchanged? && next_id_unchanged? && other_proposals_unchanged? && status_unchanged? && core_fields_unchanged? && vote_count_increased? && has_new_vote? && previous_votes_preserved? && tallies_correct?
+                        },
+                      )
+
+                    let status_active =
+                      new_proposal.status == ProposalStatus.Active
+                    let core_unchanged =
+                      new_proposal.title == proposal.title && new_proposal.description == proposal.description && new_proposal.category == proposal.category && new_proposal.proposer == proposal.proposer && new_proposal.creation_time == proposal.creation_time && new_proposal.voting_deadline == proposal.voting_deadline && new_proposal.execution_data == proposal.execution_data
+
+                    let vote_added =
+                      list.has(new_proposal.votes, Pair(voter, vote_type))
+                    let prior_votes_preserved =
+                      list.all(
+                        proposal.votes,
+                        fn(v) { list.has(new_proposal.votes, v) },
+                      )
+                    let vote_count_grew =
+                      list.length(new_proposal.votes) == list.length(
+                        proposal.votes,
+                      ) + 1
+
+                    let tallies_correct =
+                      when vote_type is {
+                        Vote.For ->
+                          new_proposal.for_votes == proposal.for_votes + 1 && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes
+                        Vote.Against ->
+                          new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes + 1 && new_proposal.abstain_votes == proposal.abstain_votes
+                        Vote.Abstain ->
+                          new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes + 1
                       }
-                      _ -> False
-                    }
-                  _ -> False
+
+                    refs_unchanged? && count_unchanged? && other_proposals_unchanged? && status_active? && core_unchanged? && vote_added? && prior_votes_preserved? && vote_count_grew? && tallies_correct?
+                  }
+                  None -> False
                 }
               }
             }
           }
+
           GovernanceAction.ExecuteProposal { proposal_id } -> {
-            // 1. Verify proposal_id is valid (within range of existing proposals)
             let valid_id =
               proposal_id >= 0 && proposal_id < list.length(datum.proposals)
+
             if !valid_id {
               False
             } else {
-              // 2. Get the proposal being executed
               expect Some(proposal) = list.at(datum.proposals, proposal_id)
-              // 3. Check if the proposal is in the correct status
+
               let is_approved = proposal.status == ProposalStatus.Approved
-              // If not already approved, check if it meets criteria to be approved
               let can_be_approved =
-                if proposal.status == ProposalStatus.Active {
-                  // Calculate total votes
-                  let total_votes =
-                    proposal.for_votes + proposal.against_votes + proposal.abstain_votes
-                  // Check if quorum is met
-                  let quorum_percentage = datum.params.quorum_percentage
-                  let quorum_met = total_votes * 100 >= quorum_percentage
-                  // Check if approval threshold is met
-                  let approval_threshold = datum.params.approval_threshold
-                  let approval_percentage =
-                    if total_votes > 0 {
-                      proposal.for_votes * 100 / total_votes
-                    } else {
-                      0
-                    }
-                  let threshold_met = approval_percentage >= approval_threshold
-                  // The proposal can be considered approved if it meets both quorum and threshold
-                  quorum_met && threshold_met
-                } else {
-                  False
-                }
-              // 4. Either the proposal must be already approved or can be approved now
+                proposal.status == ProposalStatus.Active && quorum_met(
+                  proposal,
+                  datum,
+                ) && approval_threshold_met(proposal, datum)
+
               if !is_approved && !can_be_approved {
                 False
               } else {
-                // 5. Find outputs with inline datum (should be exactly one for the updated governance state)
-                let outputs_with_inline_datum =
-                  list.filter(
-                    outputs,
-                    fn(output) {
-                      when output.datum is {
-                        InlineDatum(_) -> True
-                        _ -> False
-                      }
-                    },
-                  )
-                when outputs_with_inline_datum is {
-                  [output] ->
-                    when output.datum is {
-                      InlineDatum(data) -> {
-                        expect new_datum: GovernanceDatum = data
-                        // 6. Verify entity and treasury references remain unchanged
-                        let entity_ref_unchanged =
-                          new_datum.entity_utxo_ref == datum.entity_utxo_ref
-                        let treasury_ref_unchanged =
-                          new_datum.treasury_utxo_ref == datum.treasury_utxo_ref
-                        // 7. Verify governance parameters remain unchanged
-                        let params_unchanged = new_datum.params == datum.params
-                        // 8. Verify proposals count remains the same
-                        let proposal_count_unchanged =
-                          list.length(new_datum.proposals) == list.length(
-                            datum.proposals,
-                          )
-                        // 9. Verify next proposal ID remains unchanged
-                        let next_id_unchanged =
-                          new_datum.next_proposal_id == datum.next_proposal_id
-                        // 10. Get the updated proposal
-                        expect Some(new_proposal) =
-                          list.at(new_datum.proposals, proposal_id)
-                        // 11. Check that all proposals except the executed one are unchanged
-                        let other_proposals_unchanged =
-                          list.all(
-                            list.range(0, list.length(datum.proposals)),
-                            fn(index) {
-                              if index == proposal_id {
-                                // Skip checking the proposal that should be changed
-                                True
-                              } else {
-                                // Other proposals should be unchanged
-                                expect Some(old) =
-                                  list.at(datum.proposals, index)
-                                expect Some(new) =
-                                  list.at(new_datum.proposals, index)
-                                old == new
-                              }
-                            },
-                          )
-                        // 12. Verify the proposal status is now Executed
-                        let status_updated =
-                          new_proposal.status == ProposalStatus.Executed
-                        // 13. Verify other proposal fields remain unchanged
-                        let core_fields_unchanged =
-                          new_proposal.title == proposal.title && new_proposal.description == proposal.description && new_proposal.category == proposal.category && new_proposal.proposer == proposal.proposer && new_proposal.creation_time == proposal.creation_time && new_proposal.voting_deadline == proposal.voting_deadline && new_proposal.execution_data == proposal.execution_data && new_proposal.votes == proposal.votes && new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes
-                        // 14. Verify the transaction is properly structured for execution
-                        // Different validation based on proposal category
-                        let execution_valid =
-                          when proposal.category is {
-                            ProposalCategory.TreasuryAction ->
-                              // For treasury actions, we should verify the transaction interacts
-                              // with the treasury script correctly
-                              // For MVP, we'll just ensure it's a valid transaction by checking
-                              // that it references our treasury hash
-                              treasury_hash != #""
-                            ProposalCategory.ParameterChange ->
-                              // For parameter changes, we only need to verify the transactions
-                              // contains the correct outputs, which we've already done
-                              True
-                            ProposalCategory.MembershipChange ->
-                              // For membership changes, we should verify the transaction
-                              // interacts with the entity registry script correctly
-                              // For MVP, we'll just ensure it's a valid transaction by checking
-                              // that it references our entity registry hash
-                              entity_registry_hash != #""
-                            ProposalCategory.Other ->
-                              // For other proposal types, we don't have specific validation
-                              True
+                when get_updated_datum(outputs) is {
+                  Some(new_datum) -> {
+                    let refs_unchanged =
+                      refs_and_params_unchanged(new_datum, datum)
+                    let count_unchanged =
+                      list.length(new_datum.proposals) == list.length(
+                        datum.proposals,
+                      )
+
+                    expect Some(new_proposal) =
+                      list.at(new_datum.proposals, proposal_id)
+
+                    let other_proposals_unchanged =
+                      list.all(
+                        list.range(0, list.length(datum.proposals)),
+                        fn(index) {
+                          if index == proposal_id {
+                            True
+                          } else {
+                            expect Some(old_p) = list.at(datum.proposals, index)
+                            expect Some(new_p) =
+                              list.at(new_datum.proposals, index)
+                            old_p == new_p
                           }
-                        // All conditions must be met
-                        entity_ref_unchanged? && treasury_ref_unchanged? && params_unchanged? && proposal_count_unchanged? && next_id_unchanged? && other_proposals_unchanged? && status_updated? && core_fields_unchanged? && execution_valid?
+                        },
+                      )
+
+                    let status_executed =
+                      new_proposal.status == ProposalStatus.Executed
+                    let core_unchanged =
+                      new_proposal.title == proposal.title && new_proposal.description == proposal.description && new_proposal.category == proposal.category && new_proposal.proposer == proposal.proposer && new_proposal.creation_time == proposal.creation_time && new_proposal.voting_deadline == proposal.voting_deadline && new_proposal.execution_data == proposal.execution_data && new_proposal.votes == proposal.votes && new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes
+
+                    // Category-specific cross-contract checks
+                    let execution_valid =
+                      when proposal.category is {
+                        ProposalCategory.TreasuryAction -> treasury_hash != #""
+                        ProposalCategory.MembershipChange ->
+                          entity_registry_hash != #""
+                        ProposalCategory.ParameterChange -> True
+                        ProposalCategory.Other -> True
                       }
-                      _ -> False
-                    }
-                  _ -> False
+
+                    refs_unchanged? && count_unchanged? && other_proposals_unchanged? && status_executed? && core_unchanged? && execution_valid?
+                  }
+                  None -> False
                 }
               }
             }
           }
+
           GovernanceAction.CancelProposal { proposal_id } -> {
-            // 1. Verify proposal_id is valid (within range of existing proposals)
             let valid_id =
               proposal_id >= 0 && proposal_id < list.length(datum.proposals)
+
             if !valid_id {
               False
             } else {
-              // 2. Get the proposal being cancelled
               expect Some(proposal) = list.at(datum.proposals, proposal_id)
-              // 3. Check if the proposal is active
+
               let is_active = proposal.status == ProposalStatus.Active
-              if !is_active {
+              let signed_by_proposer =
+                list.has(extra_signatories, proposal.proposer)
+
+              if !is_active || !signed_by_proposer {
                 False
               } else {
-                // 4. Check if transaction is signed by the proposer or an admin
-                // For now, we'll simply check if it's signed by the proposer
-                let is_signed_by_proposer =
-                  list.has(extra_signatories, proposal.proposer)
-                // This is a simplified check for admin - in a full implementation,
-                // we would check against a list of admin keys from the entity registry
-                // For MVP, we'll consider anyone who can sign with the proposer's key as authorized
-                if !is_signed_by_proposer {
-                  False
-                } else {
-                  // 5. Find outputs with inline datum (should be exactly one for the updated governance state)
-                  let outputs_with_inline_datum =
-                    list.filter(
-                      outputs,
-                      fn(output) {
-                        when output.datum is {
-                          InlineDatum(_) -> True
-                          _ -> False
-                        }
-                      },
-                    )
-                  when outputs_with_inline_datum is {
-                    [output] ->
-                      when output.datum is {
-                        InlineDatum(data) -> {
-                          expect new_datum: GovernanceDatum = data
-                          // 6. Verify entity and treasury references remain unchanged
-                          let entity_ref_unchanged =
-                            new_datum.entity_utxo_ref == datum.entity_utxo_ref
-                          let treasury_ref_unchanged =
-                            new_datum.treasury_utxo_ref == datum.treasury_utxo_ref
-                          // 7. Verify governance parameters remain unchanged
-                          let params_unchanged =
-                            new_datum.params == datum.params
-                          // 8. Verify proposals count remains the same
-                          let proposal_count_unchanged =
-                            list.length(new_datum.proposals) == list.length(
-                              datum.proposals,
-                            )
-                          // 9. Verify next proposal ID remains unchanged
-                          let next_id_unchanged =
-                            new_datum.next_proposal_id == datum.next_proposal_id
-                          // 10. Get the updated proposal
-                          expect Some(new_proposal) =
-                            list.at(new_datum.proposals, proposal_id)
-                          // 11. Check that all proposals except the cancelled one are unchanged
-                          let other_proposals_unchanged =
-                            list.all(
-                              list.range(0, list.length(datum.proposals)),
-                              fn(index) {
-                                if index == proposal_id {
-                                  // Skip checking the proposal that should be changed
-                                  True
-                                } else {
-                                  // Other proposals should be unchanged
-                                  expect Some(old) =
-                                    list.at(datum.proposals, index)
-                                  expect Some(new) =
-                                    list.at(new_datum.proposals, index)
-                                  old == new
-                                }
-                              },
-                            )
-                          // 12. Verify the proposal status is now Cancelled
-                          let status_updated =
-                            new_proposal.status == ProposalStatus.Cancelled
-                          // 13. Verify other proposal fields remain unchanged
-                          let core_fields_unchanged =
-                            new_proposal.title == proposal.title && new_proposal.description == proposal.description && new_proposal.category == proposal.category && new_proposal.proposer == proposal.proposer && new_proposal.creation_time == proposal.creation_time && new_proposal.voting_deadline == proposal.voting_deadline && new_proposal.execution_data == proposal.execution_data && new_proposal.votes == proposal.votes && new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes
-                          // All conditions must be met
-                          entity_ref_unchanged? && treasury_ref_unchanged? && params_unchanged? && proposal_count_unchanged? && next_id_unchanged? && other_proposals_unchanged? && status_updated? && core_fields_unchanged?
-                        }
-                        _ -> False
-                      }
-                    _ -> False
+                when get_updated_datum(outputs) is {
+                  Some(new_datum) -> {
+                    let refs_unchanged =
+                      refs_and_params_unchanged(new_datum, datum)
+                    let count_unchanged =
+                      list.length(new_datum.proposals) == list.length(
+                        datum.proposals,
+                      )
+
+                    expect Some(new_proposal) =
+                      list.at(new_datum.proposals, proposal_id)
+
+                    let other_proposals_unchanged =
+                      list.all(
+                        list.range(0, list.length(datum.proposals)),
+                        fn(index) {
+                          if index == proposal_id {
+                            True
+                          } else {
+                            expect Some(old_p) = list.at(datum.proposals, index)
+                            expect Some(new_p) =
+                              list.at(new_datum.proposals, index)
+                            old_p == new_p
+                          }
+                        },
+                      )
+
+                    let status_cancelled =
+                      new_proposal.status == ProposalStatus.Cancelled
+                    let core_unchanged =
+                      new_proposal.title == proposal.title && new_proposal.description == proposal.description && new_proposal.category == proposal.category && new_proposal.proposer == proposal.proposer && new_proposal.creation_time == proposal.creation_time && new_proposal.voting_deadline == proposal.voting_deadline && new_proposal.execution_data == proposal.execution_data && new_proposal.votes == proposal.votes && new_proposal.for_votes == proposal.for_votes && new_proposal.against_votes == proposal.against_votes && new_proposal.abstain_votes == proposal.abstain_votes
+
+                    refs_unchanged? && count_unchanged? && other_proposals_unchanged? && status_cancelled? && core_unchanged?
                   }
+                  None -> False
                 }
               }
             }
           }
+
           GovernanceAction.UpdateParams { new_params } -> {
-            // 1. Ensure transaction is signed by at least one key
-            let has_signer = list.length(extra_signatories) > 0
-            expect Some(signer) = list.head(extra_signatories)
-            // 2. For simplicity in the MVP, we'll use a simple check for admin
-            // In a production implementation, we would verify against a list of admin keys
-            // from the entity registry or from the governance datum itself
-            let is_admin = signer != #""
-            // Use signer to avoid unused variable warning
-            if !has_signer || !is_admin {
+            // Only authorised governance admins may update parameters
+            let admin_signed =
+              is_signed_by_any_admin(extra_signatories, datum.admins)
+
+            if !admin_signed || !valid_params(new_params) {
               False
             } else {
-              // 3. Validate the new parameters
-              // Check approval threshold (must be > 50% and <= 100%)
-              let valid_approval_threshold =
-                new_params.approval_threshold > 50 && new_params.approval_threshold <= 100
-              // Check minimum voting period (must be positive)
-              let valid_voting_period = new_params.minimum_voting_period > 0
-              // Check quorum percentage (must be > 0% and <= 100%)
-              let valid_quorum =
-                new_params.quorum_percentage > 0 && new_params.quorum_percentage <= 100
-              // All parameter values must be valid
-              let valid_params =
-                valid_approval_threshold && valid_voting_period && valid_quorum
-              if !valid_params {
-                False
-              } else {
-                // 4. Find outputs with inline datum (should be exactly one for the updated governance state)
-                let outputs_with_inline_datum =
-                  list.filter(
-                    outputs,
-                    fn(output) {
-                      when output.datum is {
-                        InlineDatum(_) -> True
-                        _ -> False
-                      }
-                    },
-                  )
-                when outputs_with_inline_datum is {
-                  [output] ->
-                    when output.datum is {
-                      InlineDatum(data) -> {
-                        expect new_datum: GovernanceDatum = data
-                        // 5. Verify entity and treasury references remain unchanged
-                        let entity_ref_unchanged =
-                          new_datum.entity_utxo_ref == datum.entity_utxo_ref
-                        let treasury_ref_unchanged =
-                          new_datum.treasury_utxo_ref == datum.treasury_utxo_ref
-                        // 6. Verify governance parameters are updated correctly
-                        let params_updated = new_datum.params == new_params
-                        // 7. Verify proposals list remains unchanged
-                        let proposals_unchanged =
-                          new_datum.proposals == datum.proposals
-                        // 8. Verify next proposal ID remains unchanged
-                        let next_id_unchanged =
-                          new_datum.next_proposal_id == datum.next_proposal_id
-                        // All conditions must be met
-                        entity_ref_unchanged? && treasury_ref_unchanged? && params_updated? && proposals_unchanged? && next_id_unchanged?
-                      }
-                      _ -> False
-                    }
-                  _ -> False
+              when get_updated_datum(outputs) is {
+                Some(new_datum) -> {
+                  let refs_unchanged =
+                    new_datum.entity_utxo_ref == datum.entity_utxo_ref && new_datum.treasury_utxo_ref == datum.treasury_utxo_ref && new_datum.next_proposal_id == datum.next_proposal_id && new_datum.member_count == datum.member_count && new_datum.admins == datum.admins
+                  let params_updated = new_datum.params == new_params
+                  let proposals_unchanged =
+                    new_datum.proposals == datum.proposals
+
+                  refs_unchanged? && params_updated? && proposals_unchanged?
                 }
+                None -> False
               }
             }
           }
         }
+
       None ->
-        // Initial setup case - initialize governance datum
+        // Bootstrap: first CreateProposal initialises the governance UTxO
         when redeemer is {
           GovernanceAction.CreateProposal {
             title,
@@ -554,75 +413,42 @@ validator governance(
             voting_deadline,
             execution_data,
           } -> {
-            // 1. Ensure valid proposal details
-            let valid_title = title != ""
-            let valid_description = description != ""
-            // Verify category is a valid ProposalCategory (uses the imported type)
-            let valid_category = is_valid_category(category)
-            // 2. Ensure transaction is signed by at least one key (initial admin)
+            let valid_title = title != #""
+            let valid_description = description != #""
             let has_signer = list.length(extra_signatories) > 0
-            expect Some(proposer) = list.head(extra_signatories)
-            // 3. Verify voting deadline is in the future
-            // In production, you would compare with tx.validity_range
-            let current_time = 0
-            // Placeholder - in real implementation use tx validity lower bound
             let valid_deadline = voting_deadline > current_time
-            // 4. Find outputs with inline datum (should be exactly one)
-            let outputs_with_inline_datum =
-              list.filter(
-                outputs,
-                fn(output) {
-                  when output.datum is {
-                    InlineDatum(_) -> True
-                    _ -> False
+
+            expect Some(proposer) = list.head(extra_signatories)
+
+            when get_updated_datum(outputs) is {
+              Some(new_datum) -> {
+                let valid_refs =
+                  new_datum.entity_utxo_ref.transaction_id != #"" && new_datum.treasury_utxo_ref.transaction_id != #""
+                let valid_initial_params = valid_params(new_datum.params)
+                let has_admins = list.length(new_datum.admins) > 0
+                let one_proposal = list.length(new_datum.proposals) == 1
+                let next_id_is_one = new_datum.next_proposal_id == 1
+
+                let proposal_valid =
+                  when list.head(new_datum.proposals) is {
+                    Some(p) ->
+                      p.title == title && p.description == description && p.category == category && p.proposer == proposer && p.voting_deadline == voting_deadline && p.execution_data == execution_data && p.status == ProposalStatus.Active && list.is_empty(
+                        p.votes,
+                      ) && p.for_votes == 0 && p.against_votes == 0 && p.abstain_votes == 0
+                    None -> False
                   }
-                },
-              )
-            // 5. Verify there is exactly one output with an inline datum
-            when outputs_with_inline_datum is {
-              [output] ->
-                // 6. Verify the output datum is correctly initialized
-                when output.datum is {
-                  InlineDatum(data) -> {
-                    expect new_datum: GovernanceDatum = data
-                    // 7. Verify entity and treasury references are non-empty
-                    let valid_entity_ref =
-                      new_datum.entity_utxo_ref.transaction_id != #""
-                    let valid_treasury_ref =
-                      new_datum.treasury_utxo_ref.transaction_id != #""
-                    // 8. Verify initial parameters are reasonable
-                    let valid_params =
-                      new_datum.params.approval_threshold > 50 && new_datum.params.approval_threshold <= 100 && new_datum.params.minimum_voting_period > 0 && new_datum.params.quorum_percentage > 0 && new_datum.params.quorum_percentage <= 100
-                    // 9. Verify proposals list contains exactly one item (this proposal)
-                    let has_one_proposal = list.length(new_datum.proposals) == 1
-                    // 10. Verify the proposal is correctly formatted
-                    let proposal_valid =
-                      when list.head(new_datum.proposals) is {
-                        Some(proposal) ->
-                          proposal.title == title && proposal.description == description && proposal.category == category && proposal.proposer == proposer && proposal.creation_time >= 0 && proposal.voting_deadline == voting_deadline && proposal.execution_data == execution_data && // Using execution_data here
-                          proposal.status == ProposalStatus.Active && list.is_empty(
-                            proposal.votes,
-                          ) && proposal.for_votes == 0 && proposal.against_votes == 0 && proposal.abstain_votes == 0
-                        None -> False
-                      }
-                    // 11. Verify next_proposal_id is set to 1
-                    let valid_next_id = new_datum.next_proposal_id == 1
-                    // All conditions must be met
-                    valid_title? && valid_description? && valid_category? && has_signer? && valid_deadline? && valid_entity_ref? && valid_treasury_ref? && valid_params? && has_one_proposal? && proposal_valid? && valid_next_id?
-                  }
-                  _ -> False
-                }
-              _ -> False
+
+                valid_title? && valid_description? && has_signer? && valid_deadline? && valid_refs? && valid_initial_params? && has_admins? && one_proposal? && next_id_is_one? && proposal_valid?
+              }
+              None -> False
             }
           }
-          // Any other action is invalid when no datum exists
           _ -> False
         }
     }
   }
 
   else(_) {
-    // Any other use of this validator should fail
     False
   }
 }

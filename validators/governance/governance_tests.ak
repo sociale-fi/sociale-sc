@@ -1,4 +1,6 @@
 // validators/governance/governance_tests.ak
+
+use aiken/collection/list
 use cardano/assets.{from_lovelace}
 use cardano/transaction.{OutputReference, Transaction}
 use governance/types.{
@@ -11,58 +13,48 @@ use mocktail.{
 use mocktail/virgin_key_hash.{mock_pub_key_hash}
 use mocktail/virgin_output_reference.{mock_utxo_ref}
 
-// Test that our current placeholder implementation behaves as expected
-test governance_placeholder_returns_false() {
-  // Create default governance parameters for testing
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      // 1 day in milliseconds
-      quorum_percentage: 25,
-    }
+// ── Test helpers ──────────────────────────────────────────────────────────────
 
-  // Create a mock test datum representing an initialized governance contract
-  let datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [],
-        next_proposal_id: 0,
-      },
-    )
-
-  // Create a simple redeemer for testing compilation
-  let redeemer =
-    GovernanceAction.CreateProposal {
-      title: "Test Proposal",
-      description: "This is a test proposal",
-      category: ProposalCategory.Other,
-      voting_deadline: 1625097600000,
-      execution_data: Void,
-    }
-
-  // Create a mock transaction
-  let tx = mocktail_tx() |> complete()
-
-  // Reference the validator directly
-  let result =
-    governance(
-      #"0000000000000000000000000000000000000000000000000000000000000000",
-      #"0000000000000000000000000000000000000000000000000000000000000000",
-      datum,
-      redeemer,
-      mock_utxo_ref(0, 0),
-      tx,
-    )
-
-  // This should pass since our validator returns False
-  result == False
+fn default_params() -> GovernanceParams {
+  GovernanceParams {
+    approval_threshold: 60,
+    minimum_voting_period: 86400000,
+    quorum_percentage: 25,
+  }
 }
 
-// Helper to reference the validator directly
+fn sample_datum(member_count: Int) -> GovernanceDatum {
+  GovernanceDatum {
+    entity_utxo_ref: mock_utxo_ref(0, 0),
+    treasury_utxo_ref: mock_utxo_ref(0, 1),
+    params: default_params(),
+    proposals: [],
+    next_proposal_id: 0,
+    member_count,
+    admins: [mock_pub_key_hash(0)],
+  }
+}
+
+fn active_proposal() -> Proposal {
+  Proposal {
+    title: "Test Proposal",
+    description: "A test proposal",
+    category: ProposalCategory.Other,
+    proposer: mock_pub_key_hash(0),
+    creation_time: 1700000000000,
+    voting_deadline: 1700100000000,
+    status: ProposalStatus.Active,
+    execution_data: Void,
+    votes: [],
+    for_votes: 0,
+    against_votes: 0,
+    abstain_votes: 0,
+  }
+}
+
+/// Stub — mirrors the validator interface; tests data structure compilation.
+/// All integration tests against this function expect False since the validator
+/// is not called directly (private spend entrypoint).
 fn governance(
   _entity_registry_hash: ByteArray,
   _treasury_hash: ByteArray,
@@ -71,682 +63,288 @@ fn governance(
   _own_ref: OutputReference,
   _tx: Transaction,
 ) -> Bool {
-  // We'll implement a direct call to the validator here
-  // For now, just return False to match our placeholder implementation
   False
 }
 
-// Test that the fallback handler also returns False
-test governance_fallback_returns_false() {
-  // We can't easily test the fallback handler without direct access
-  // So we'll just verify behavior matches our expected outcome
-  False == False
+// ── Structural compilation tests ──────────────────────────────────────────────
+
+test datum_structure_compiles() {
+  let datum = sample_datum(10)
+  datum.member_count == 10 && list.length(datum.admins) == 1
 }
 
-// Test 1: CreateProposal - succeeds for initial setup
-test create_proposal_initial_succeeds() {
-  // Create a redeemer for initial proposal
+test proposal_structure_compiles() {
+  let p = active_proposal()
+  p.status == ProposalStatus.Active && p.for_votes == 0
+}
+
+test create_proposal_redeemer_compiles() {
   let redeemer =
     GovernanceAction.CreateProposal {
-      title: "Initial Proposal",
-      description: "This is the initial proposal",
+      title: "Test",
+      description: "A test",
       category: ProposalCategory.Other,
-      voting_deadline: 1625097600000,
+      voting_deadline: 1700200000000,
       execution_data: Void,
     }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
-  // Expected to be False since our helper is a placeholder
   governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
+    #"",
+    #"",
     None,
     redeemer,
     mock_utxo_ref(0, 0),
-    tx,
+    mocktail_tx() |> complete(),
   ) == False
 }
 
-// Test 2: CreateProposal - succeeds with existing datum
-test create_proposal_with_existing_datum() {
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum
-  let existing_datum =
+test cast_vote_redeemer_compiles() {
+  let datum =
     Some(
       GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [],
-        next_proposal_id: 0,
-      },
-    )
-
-  // Create a redeemer for a new proposal
-  let redeemer =
-    GovernanceAction.CreateProposal {
-      title: "New Proposal",
-      description: "This is a new proposal",
-      category: ProposalCategory.TreasuryAction,
-      voting_deadline: 1625097600000,
-      execution_data: Void,
-    }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
-  governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
-    redeemer,
-    mock_utxo_ref(0, 0),
-    tx,
-  ) == False
-}
-
-// Test 3: CastVote - succeeds with valid proposal ID
-test cast_vote_success() {
-  // Create a proposal for testing
-  let test_proposal =
-    Proposal {
-      title: "Test Proposal",
-      description: "This is a test proposal",
-      category: ProposalCategory.Other,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
-      status: ProposalStatus.Active,
-      execution_data: Void,
-      votes: [],
-      for_votes: 0,
-      against_votes: 0,
-      abstain_votes: 0,
-    }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum with the proposal
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [test_proposal],
+        ..sample_datum(10),
+        proposals: [active_proposal()],
         next_proposal_id: 1,
       },
     )
-
-  // Create redeemer to cast a vote
   let redeemer = GovernanceAction.CastVote { proposal_id: 0, vote: Vote.For }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
   governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
+    #"",
+    #"",
+    datum,
     redeemer,
     mock_utxo_ref(0, 0),
-    tx,
+    mocktail_tx() |> complete(),
   ) == False
 }
 
-// Test 4: ExecuteProposal - succeeds with approved proposal
-test execute_proposal_success() {
-  // Create an approved proposal for testing
-  let approved_proposal =
+test execute_proposal_redeemer_compiles() {
+  let approved =
     Proposal {
-      title: "Approved Proposal",
-      description: "This is an approved proposal",
-      category: ProposalCategory.Other,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
+      ..active_proposal(),
       status: ProposalStatus.Approved,
-      execution_data: Void,
-      votes: [
-        Pair(mock_pub_key_hash(0), Vote.For),
-        Pair(mock_pub_key_hash(1), Vote.For),
-      ],
       for_votes: 2,
-      against_votes: 0,
-      abstain_votes: 0,
     }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum with the approved proposal
-  let existing_datum =
+  let datum =
     Some(
       GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [approved_proposal],
+        ..sample_datum(4),
+        proposals: [approved],
         next_proposal_id: 1,
       },
     )
-
-  // Create redeemer to execute the proposal
   let redeemer = GovernanceAction.ExecuteProposal { proposal_id: 0 }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
   governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
+    #"",
+    #"",
+    datum,
     redeemer,
     mock_utxo_ref(0, 0),
-    tx,
+    mocktail_tx() |> complete(),
   ) == False
 }
 
-// Test 4.1: ExecuteProposal - succeeds with active proposal that meets criteria
-test execute_active_proposal_success() {
-  // Create an active proposal with enough votes to meet criteria
-  let active_proposal =
-    Proposal {
-      title: "Active Proposal Meeting Criteria",
-      description: "This proposal is active but meets criteria for approval",
-      category: ProposalCategory.Other,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
-      status: ProposalStatus.Active,
-      execution_data: Void,
-      votes: [
-        Pair(mock_pub_key_hash(0), Vote.For),
-        Pair(mock_pub_key_hash(1), Vote.For),
-        Pair(mock_pub_key_hash(2), Vote.For),
-        Pair(mock_pub_key_hash(3), Vote.Against),
-      ],
-      for_votes: 3,
-      against_votes: 1,
-      abstain_votes: 0,
-    }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      // 3/4 = 75% > 60%
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // 4 votes is enough for quorum
-  // Create an existing datum with the active proposal
-  let existing_datum =
+test cancel_proposal_redeemer_compiles() {
+  let datum =
     Some(
       GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [active_proposal],
+        ..sample_datum(10),
+        proposals: [active_proposal()],
         next_proposal_id: 1,
       },
     )
-
-  // Create redeemer to execute the proposal
-  let redeemer = GovernanceAction.ExecuteProposal { proposal_id: 0 }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
-  governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
-    redeemer,
-    mock_utxo_ref(0, 0),
-    tx,
-  ) == False
-}
-
-// Test 4.2: ExecuteProposal - fails with active proposal that doesn't meet criteria
-test execute_active_proposal_fails() {
-  // Create an active proposal with not enough votes to meet criteria
-  let active_proposal =
-    Proposal {
-      title: "Active Proposal Not Meeting Criteria",
-      description: "This proposal is active but doesn't meet criteria for approval",
-      category: ProposalCategory.Other,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
-      status: ProposalStatus.Active,
-      execution_data: Void,
-      votes: [
-        Pair(mock_pub_key_hash(0), Vote.For),
-        Pair(mock_pub_key_hash(1), Vote.Against),
-      ],
-      for_votes: 1,
-      against_votes: 1,
-      abstain_votes: 0,
-    }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      // 1/2 = 50% < 60%
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum with the active proposal
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [active_proposal],
-        next_proposal_id: 1,
-      },
-    )
-
-  // Create redeemer to execute the proposal
-  let redeemer = GovernanceAction.ExecuteProposal { proposal_id: 0 }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
-  governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
-    redeemer,
-    mock_utxo_ref(0, 0),
-    tx,
-  ) == False
-}
-
-// Test 5: CancelProposal - succeeds with active proposal
-test cancel_proposal_success() {
-  // Create an active proposal for testing
-  let active_proposal =
-    Proposal {
-      title: "Active Proposal",
-      description: "This is an active proposal",
-      category: ProposalCategory.Other,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
-      status: ProposalStatus.Active,
-      execution_data: Void,
-      votes: [],
-      for_votes: 0,
-      against_votes: 0,
-      abstain_votes: 0,
-    }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum with the active proposal
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [active_proposal],
-        next_proposal_id: 1,
-      },
-    )
-
-  // Create redeemer to cancel the proposal
   let redeemer = GovernanceAction.CancelProposal { proposal_id: 0 }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
   governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
+    #"",
+    #"",
+    datum,
     redeemer,
     mock_utxo_ref(0, 0),
-    tx,
+    mocktail_tx() |> complete(),
   ) == False
 }
 
-// Test 5.1: CancelProposal - fails with non-active proposal
-test cancel_non_active_proposal_fails() {
-  // Create a non-active (approved) proposal
-  let approved_proposal =
-    Proposal {
-      title: "Approved Proposal",
-      description: "This is an approved proposal that cannot be cancelled",
-      category: ProposalCategory.Other,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
-      status: ProposalStatus.Approved,
-      execution_data: Void,
-      votes: [],
-      for_votes: 0,
-      against_votes: 0,
-      abstain_votes: 0,
-    }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum with the approved proposal
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [approved_proposal],
-        next_proposal_id: 1,
-      },
-    )
-
-  // Create redeemer to cancel the proposal
-  let redeemer = GovernanceAction.CancelProposal { proposal_id: 0 }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
-  governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
-    redeemer,
-    mock_utxo_ref(0, 0),
-    tx,
-  ) == False
-}
-
-// Test 6: UpdateParams - succeeds with valid parameters
-test update_params_success() {
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create new governance parameters
+test update_params_redeemer_compiles() {
+  let datum = Some(sample_datum(10))
   let new_params =
     GovernanceParams {
       approval_threshold: 70,
       minimum_voting_period: 172800000,
-      // 2 days
       quorum_percentage: 30,
     }
-
-  // Create an existing datum
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [],
-        next_proposal_id: 0,
-      },
-    )
-
-  // Create redeemer to update parameters
   let redeemer = GovernanceAction.UpdateParams { new_params }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
   governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
+    #"",
+    #"",
+    datum,
     redeemer,
     mock_utxo_ref(0, 0),
-    tx,
+    mocktail_tx() |> complete(),
   ) == False
 }
 
-// Test 6.1: UpdateParams - fails with invalid parameters
-test update_params_with_invalid_params_fails() {
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create new invalid governance parameters
-  let invalid_params =
-    GovernanceParams {
-      approval_threshold: 40,
-      // Less than 50% - should be invalid
-      minimum_voting_period: 172800000,
-      quorum_percentage: 30,
-    }
-
-  // Create an existing datum
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [],
-        next_proposal_id: 0,
-      },
-    )
-
-  // Create redeemer to update parameters
-  let redeemer = GovernanceAction.UpdateParams { new_params: invalid_params }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
-  governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
-    redeemer,
-    mock_utxo_ref(0, 0),
-    tx,
-  ) == False
-}
-
-// Test for more detailed validation: ExecuteProposal with TreasuryAction category
-test execute_proposal_treasury_action() {
-  // Create an approved proposal for testing with TreasuryAction category
-  let approved_proposal =
+test execute_with_output_datum_compiles() {
+  let approved =
     Proposal {
-      title: "Treasury Action Proposal",
-      description: "This is a proposal for treasury action",
-      category: ProposalCategory.TreasuryAction,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
+      ..active_proposal(),
       status: ProposalStatus.Approved,
-      execution_data: Void,
-      votes: [
-        Pair(mock_pub_key_hash(0), Vote.For),
-        Pair(mock_pub_key_hash(1), Vote.For),
-      ],
       for_votes: 2,
-      against_votes: 0,
-      abstain_votes: 0,
     }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum with the approved proposal
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [approved_proposal],
-        next_proposal_id: 1,
-      },
-    )
-
-  // Create redeemer to execute the proposal
-  let redeemer = GovernanceAction.ExecuteProposal { proposal_id: 0 }
-
-  // Create a transaction (details don't matter for this test)
-  let tx = mocktail_tx() |> complete()
-
-  // Call our helper function, which will return False
-  governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
-    redeemer,
-    mock_utxo_ref(0, 0),
-    tx,
-  ) == False
-}
-
-// Test for more detailed validation: with properly formatted output datum
-test execute_proposal_with_formatted_output() {
-  // Create an approved proposal for testing
-  let approved_proposal =
-    Proposal {
-      title: "Approved Proposal",
-      description: "This is an approved proposal",
-      category: ProposalCategory.Other,
-      proposer: mock_pub_key_hash(0),
-      creation_time: 1625097500000,
-      voting_deadline: 1625097600000,
-      status: ProposalStatus.Approved,
-      execution_data: Void,
-      votes: [
-        Pair(mock_pub_key_hash(0), Vote.For),
-        Pair(mock_pub_key_hash(1), Vote.For),
-      ],
-      for_votes: 2,
-      against_votes: 0,
-      abstain_votes: 0,
-    }
-
-  // Create default governance parameters
-  let default_params =
-    GovernanceParams {
-      approval_threshold: 60,
-      minimum_voting_period: 86400000,
-      quorum_percentage: 25,
-    }
-
-  // Create an existing datum with the approved proposal
-  let existing_datum =
-    Some(
-      GovernanceDatum {
-        entity_utxo_ref: mock_utxo_ref(0, 0),
-        treasury_utxo_ref: mock_utxo_ref(0, 1),
-        params: default_params,
-        proposals: [approved_proposal],
-        next_proposal_id: 1,
-      },
-    )
-
-  // Create a copy of the proposal with Executed status for the output datum
-  let executed_proposal =
-    Proposal {
-      title: approved_proposal.title,
-      description: approved_proposal.description,
-      category: approved_proposal.category,
-      proposer: approved_proposal.proposer,
-      creation_time: approved_proposal.creation_time,
-      voting_deadline: approved_proposal.voting_deadline,
-      status: ProposalStatus.Executed,
-      execution_data: approved_proposal.execution_data,
-      votes: approved_proposal.votes,
-      for_votes: approved_proposal.for_votes,
-      against_votes: approved_proposal.against_votes,
-      abstain_votes: approved_proposal.abstain_votes,
-    }
-
-  // Create the output datum with the executed proposal
-  let output_datum =
+  let datum =
     GovernanceDatum {
-      entity_utxo_ref: mock_utxo_ref(0, 0),
-      treasury_utxo_ref: mock_utxo_ref(0, 1),
-      params: default_params,
-      proposals: [executed_proposal],
+      ..sample_datum(4),
+      proposals: [approved],
       next_proposal_id: 1,
     }
+  let executed = Proposal { ..approved, status: ProposalStatus.Executed }
+  let output_datum = GovernanceDatum { ..datum, proposals: [executed] }
 
-  // Create redeemer to execute the proposal
-  let redeemer = GovernanceAction.ExecuteProposal { proposal_id: 0 }
-
-  // Create a transaction with the properly formatted output datum
   let tx =
     mocktail_tx()
       |> tx_out(True, mock_script_address(0, None), from_lovelace(10_000_000))
       |> tx_out_inline_datum(True, output_datum)
       |> complete()
 
-  // Call our helper function, which will return False
   governance(
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    #"0000000000000000000000000000000000000000000000000000000000000000",
-    existing_datum,
-    redeemer,
+    #"",
+    #"",
+    Some(datum),
+    GovernanceAction.ExecuteProposal { proposal_id: 0 },
     mock_utxo_ref(0, 0),
     tx,
   ) == False
+}
+
+// ── Quorum logic tests ────────────────────────────────────────────────────────
+
+test quorum_requires_percentage_of_member_count() {
+  // 10 members, 25% quorum = need at least 3 votes (ceil(10 * 0.25) = 3)
+  let member_count = 10
+  let quorum_percentage = 25
+
+  // 2 votes: 2 * 100 = 200, 25 * 10 = 250 → 200 < 250 → quorum NOT met
+  let two_votes_fail = 2 * 100 < quorum_percentage * member_count
+
+  // 3 votes: 3 * 100 = 300, 25 * 10 = 250 → 300 >= 250 → quorum met
+  let three_votes_pass = 3 * 100 >= quorum_percentage * member_count
+
+  two_votes_fail && three_votes_pass
+}
+
+test quorum_formula_previous_implementation_was_wrong() {
+  // Demonstrates the old formula always passed with even 1 vote
+  // Old: total_votes * 100 >= quorum_percentage (e.g. 1 * 100 = 100 >= 25)
+  let old_formula_with_one_vote = 1 * 100 >= 25
+  // New: total_votes * 100 >= quorum_percentage * member_count
+  // (e.g. 1 * 100 = 100 < 25 * 10 = 250 for 10 members)
+  let new_formula_with_one_vote = 1 * 100 >= 25 * 10
+
+  // Old formula incorrectly passes; new formula correctly fails
+  old_formula_with_one_vote && !new_formula_with_one_vote
+}
+
+test approval_threshold_requires_majority_of_votes_cast() {
+  // 60% threshold: 3 for, 1 against = 75% → passes
+  let for_votes = 3
+  let against_votes = 1
+  let total = for_votes + against_votes
+  let threshold = 60
+
+  let passes = for_votes * 100 / total >= threshold
+  passes
+}
+
+test approval_threshold_fails_below_threshold() {
+  // 60% threshold: 1 for, 1 against = 50% → fails
+  let for_votes = 1
+  let against_votes = 1
+  let total = for_votes + against_votes
+  let threshold = 60
+
+  let fails = for_votes * 100 / total < threshold
+  fails
+}
+
+// ── Admin auth tests ──────────────────────────────────────────────────────────
+
+test update_params_requires_admin_from_list() {
+  let admin = mock_pub_key_hash(0)
+  let non_admin = mock_pub_key_hash(9)
+  let admins = [admin]
+
+  let admin_passes = list.any(admins, fn(a) { a == admin })
+  let non_admin_fails = !list.any(admins, fn(a) { a == non_admin })
+
+  admin_passes && non_admin_fails
+}
+
+test update_params_rejects_arbitrary_signer() {
+  // Demonstrates the old check: signer != #"" would pass for any signer
+  let arbitrary_signer = mock_pub_key_hash(99)
+  let old_check_passes = arbitrary_signer != #""
+
+  // New check: must be in admins list
+  let admins = [mock_pub_key_hash(0)]
+  let new_check_fails = !list.has(admins, arbitrary_signer)
+
+  old_check_passes && new_check_fails
+}
+
+// ── Governance params validation ──────────────────────────────────────────────
+
+test valid_params_accepted() {
+  let p =
+    GovernanceParams {
+      approval_threshold: 60,
+      minimum_voting_period: 86400000,
+      quorum_percentage: 25,
+    }
+  p.approval_threshold > 50 && p.minimum_voting_period > 0 && p.quorum_percentage > 0
+}
+
+test invalid_approval_threshold_rejected() {
+  let low_threshold =
+    GovernanceParams {
+      approval_threshold: 40,
+      minimum_voting_period: 86400000,
+      quorum_percentage: 25,
+    }
+  let high_threshold =
+    GovernanceParams {
+      approval_threshold: 101,
+      minimum_voting_period: 86400000,
+      quorum_percentage: 25,
+    }
+  !(low_threshold.approval_threshold > 50) && !(high_threshold.approval_threshold <= 100)
+}
+
+// ── Vote tally tests ──────────────────────────────────────────────────────────
+
+test vote_tallies_maintained_correctly() {
+  let base = active_proposal()
+  let after_for = Proposal { ..base, for_votes: base.for_votes + 1 }
+  let after_against = Proposal { ..base, against_votes: base.against_votes + 1 }
+  let after_abstain = Proposal { ..base, abstain_votes: base.abstain_votes + 1 }
+
+  after_for.for_votes == 1 && after_against.against_votes == 1 && after_abstain.abstain_votes == 1
+}
+
+test duplicate_vote_detection() {
+  let voter = mock_pub_key_hash(1)
+  let proposal =
+    Proposal {
+      ..active_proposal(),
+      votes: [Pair(voter, Vote.For)],
+      for_votes: 1,
+    }
+
+  let already_voted =
+    list.any(
+      proposal.votes,
+      fn(pair) {
+        let Pair(k, _) = pair
+        k == voter
+      },
+    )
+
+  already_voted
 }

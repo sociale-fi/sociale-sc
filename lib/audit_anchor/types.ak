@@ -1,5 +1,5 @@
 // lib/audit_anchor/types.ak
-// Types for the Audit Anchor validator — Phase A: Verifiable Ledger
+// Types and hashing utility for the Audit Anchor validator.
 //
 // The audit anchor provides cryptographic proof that a cooperative's transaction
 // records have not been altered. Transaction batches are hashed (Merkle root)
@@ -7,6 +7,9 @@
 //
 // Each cooperative has one UTxO at the audit anchor script address. Anchors
 // form a chain via prev_record_hash, making gaps in the history detectable.
+
+use aiken/builtin
+use aiken/crypto
 
 /// On-chain state stored at the audit anchor script address.
 /// One UTxO per cooperative, identified by cooperative_id.
@@ -43,4 +46,11 @@ pub type AnchorAction {
   Anchor { record: AnchorRecord }
   /// Transfer operator authority to a new key (e.g. key rotation)
   RotateOperator { new_operator: ByteArray }
+}
+
+/// Canonical hash of an AnchorRecord used to link the anchor chain.
+/// The off-chain indexer must reproduce this (CBOR-serialise then blake2b-256)
+/// to verify record integrity.
+pub fn hash_record(record: AnchorRecord) -> ByteArray {
+  crypto.blake2b_256(builtin.serialise_data(record))
 }

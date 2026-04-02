@@ -109,24 +109,6 @@ To add or remove admins:
    - Only existing admins can modify the admin list
    - At least one admin always remains to maintain control
 
-## Best Practices
-
-1. **Transaction Structure**
-   - Always include exactly one output with an inline datum for validator state updates
-   - Ensure the output datum is correctly formatted with all required fields
-
-2. **Authorization**
-   - Use the appropriate signer for each action type
-   - Remember that only admins can modify entity data after initial creation
-
-3. **Data Integrity**
-   - Preserve existing data when updating specific fields
-   - Ensure member counts and admin lists remain consistent
-
-4. **Testing**
-   - Thoroughly test all operations before deploying to mainnet
-   - Use the provided test suite to verify validator behavior
-
 ## Integration with Other Contracts
 
 The Entity Registry is designed to work alongside other Sociale smart contracts:
@@ -135,19 +117,3 @@ The Entity Registry is designed to work alongside other Sociale smart contracts:
 - **Governance Contract** - Checks admin permissions and member eligibility for voting
 
 When integrating with these contracts, use the Entity Registry's hash as a parameter to enable cross-contract validation.
-
-## Limitations and Future Enhancements
-
-Current limitations include:
-
-- Basic member information without complex KYC
-- No automated membership expiry or renewal
-- Limited member metadata fields
-- Simple role system (admin/non-admin)
-
-Future enhancements could include:
-
-- Delegation of admin powers
-- Tiered membership levels
-- Reputation systems
-- More comprehensive member profiles

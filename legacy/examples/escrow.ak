@@ -1,9 +1,11 @@
+// Example: Simple Buyer-Seller Escrow
+// Developed alongside competition contracts. Not part of the core cooperative contract suite.
+
 use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
-use aiken/interval.{Finite, Interval, NegativeInfinity, PositiveInfinity}
+use aiken/interval.{Finite, NegativeInfinity, PositiveInfinity}
 use cardano/transaction.{OutputReference, Transaction, ValidityRange}
 
-// Helper functions
 fn is_buyer_signed(tx: Transaction, buyer: VerificationKeyHash) -> Bool {
   list.has(tx.extra_signatories, buyer)
 }
@@ -20,7 +22,6 @@ fn is_deadline_passed(validity_range: ValidityRange, deadline: Int) -> Bool {
   }
 }
 
-// Datum that will be attached when locking funds in the escrow
 pub type EscrowDatum {
   buyer: VerificationKeyHash,
   seller: VerificationKeyHash,
@@ -28,7 +29,6 @@ pub type EscrowDatum {
   deadline: Int,
 }
 
-// Redeemer for spending from the escrow
 pub type EscrowRedeemer {
   action: Int,
 }
@@ -43,18 +43,16 @@ validator escrow {
     expect Some(EscrowDatum { buyer, seller, deadline, .. }) = datum
 
     when redeemer.action is {
+      // Buyer claims refund after deadline
       0 ->
-        // Buyer can claim refund if deadline has passed
         is_buyer_signed(tx, buyer) && is_deadline_passed(
           tx.validity_range,
           deadline,
         )
-      1 ->
-        // Seller can claim payment if buyer approves
-        is_seller_signed(tx, seller) && is_buyer_signed(tx, buyer)
-      2 ->
-        // Buyer can approve the work and release payment
-        is_buyer_signed(tx, buyer)
+      // Seller claims payment with buyer approval
+      1 -> is_seller_signed(tx, seller) && is_buyer_signed(tx, buyer)
+      // Buyer releases payment directly
+      2 -> is_buyer_signed(tx, buyer)
       _ -> is_buyer_signed(tx, buyer)
     }
   }

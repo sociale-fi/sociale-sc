@@ -1,44 +1,51 @@
 // lib/entity_registry/types.ak
-// Entity Registry Types - MVP with NFT Integration
-// Types for single contract serving multiple SACCO entities
 
 use aiken/crypto.{VerificationKeyHash}
 
-/// SACCO entity metadata
+/// Lifecycle status of a cooperative member
+pub type MemberStatus {
+  Active
+  Inactive
+  Suspended
+}
+
+/// Cooperative entity metadata
 pub type Entity {
   name: ByteArray,
   description: ByteArray,
+  /// POSIX timestamp (ms) when the cooperative was created on-chain
   creation_time: Int,
   founder: VerificationKeyHash,
   member_count: Int,
 }
 
-/// Member record with NFT integration
+/// Cooperative member record
 pub type Member {
   name: ByteArray,
   verification_key_hash: VerificationKeyHash,
+  /// POSIX timestamp (ms) when the member joined
   join_time: Int,
+  /// Token name of this member's identity NFT
   nft_token_name: ByteArray,
+  status: MemberStatus,
+  /// Optional KERI Autonomic Identifier — links on-chain identity to the KERI identity layer
+  keri_aid: Option<ByteArray>,
 }
 
-/// Registry datum - stored on-chain for each SACCO entity
+/// On-chain state for a cooperative entity.
+/// Each cooperative is a separate UTxO at the entity registry script address.
 pub type RegistryDatum {
   entity: Entity,
   members: List<Member>,
-  admin: VerificationKeyHash,
+  /// Ordered list of authorised administrator verification key hashes
+  admins: List<VerificationKeyHash>,
 }
 
-/// Redeemer actions for entity operations
+/// Redeemer actions for the entity registry validator
 pub type RegistryAction {
   CreateEntity { name: ByteArray, description: ByteArray }
   AddMember { member: Member }
+  UpdateMemberStatus { vkh: VerificationKeyHash, new_status: MemberStatus }
+  AddAdmin { vkh: VerificationKeyHash }
+  RemoveAdmin { vkh: VerificationKeyHash }
 }
-// POST-MVP EXTENSIONS:
-// - Add MemberStatus enum (Active/Inactive/Suspended)
-// - Multi-admin support with role-based permissions
-// - Member levels and KYC verification status
-// - Governance configuration and treasury settings
-// - Compliance framework and audit trails
-// - Enhanced redeemer actions for status updates
-// - Cross-entity member portability
-// - Integration with external systems

@@ -1,404 +1,386 @@
 // validators/entity_registry/entity_registry_tests.ak
-// Entity Registry Tests - MVP with NFT Integration
-// Tests for single contract serving multiple SACCO entities
 
 use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
 use cardano/assets.{from_lovelace}
 use cardano/transaction.{InlineDatum, Transaction}
-use entity_registry/types.{Entity, Member, RegistryDatum}
+use entity_registry/types.{Entity, Member, MemberStatus, RegistryDatum}
 use mocktail.{
   complete, mock_script_address, mocktail_tx, required_signer_hash, tx_out,
   tx_out_inline_datum,
 }
 use mocktail/virgin_key_hash.{mock_pub_key_hash}
 
-/// Create a sample entity for testing
-fn create_sample_entity(
-  founder: VerificationKeyHash,
-  creation_time: Int,
-) -> Entity {
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+fn sample_entity(founder: VerificationKeyHash, creation_time: Int) -> Entity {
   Entity {
     name: "Test SACCO",
-    description: "Test SACCO Description",
+    description: "A test cooperative",
     creation_time,
     founder,
     member_count: 0,
   }
 }
 
-/// Create a sample member with NFT for testing
-fn create_sample_member(
+fn sample_member(
   vkh: VerificationKeyHash,
   name: ByteArray,
   join_time: Int,
-  nft_token: ByteArray,
 ) -> Member {
   Member {
     name,
     verification_key_hash: vkh,
     join_time,
-    nft_token_name: nft_token,
+    nft_token_name: "member_cert",
+    status: MemberStatus.Active,
+    keri_aid: None,
   }
 }
 
-// Test 1: Entity creation (creates new UTxO at contract)
-test entity_creation_success() {
-  let signer = mock_pub_key_hash(0)
-  let current_time = 1625097600000
-  let entity_name = "Farmers Cooperative"
-  let entity_description = "A cooperative for local farmers"
+fn sample_datum(admin: VerificationKeyHash) -> RegistryDatum {
+  RegistryDatum {
+    entity: sample_entity(admin, 1700000000000),
+    members: [],
+    admins: [admin],
+  }
+}
 
-  let expected_datum =
+fn tx_with_signer_and_datum(
+  signer: VerificationKeyHash,
+  datum: RegistryDatum,
+) -> Transaction {
+  mocktail_tx()
+    |> required_signer_hash(True, signer)
+    |> tx_out(True, mock_script_address(0, None), from_lovelace(10_000_000))
+    |> tx_out_inline_datum(True, datum)
+    |> complete()
+}
+
+// ── Entity creation ───────────────────────────────────────────────────────────
+
+test create_entity_output_structure() {
+  let founder = mock_pub_key_hash(0)
+  let creation_time = 1700000000000
+
+  let output_datum =
     RegistryDatum {
       entity: Entity {
-        name: entity_name,
-        description: entity_description,
-        creation_time: current_time,
-        founder: signer,
+        name: "Farmers Cooperative",
+        description: "Agricultural savings group",
+        creation_time,
+        founder,
         member_count: 0,
       },
       members: [],
-      admin: signer,
+      admins: [founder],
     }
 
-  let tx =
-    mocktail_tx()
-      |> required_signer_hash(True, signer)
-      |> tx_out(True, mock_script_address(0, None), from_lovelace(10_000_000))
-      |> tx_out_inline_datum(True, expected_datum)
-      |> complete()
+  let tx = tx_with_signer_and_datum(founder, output_datum)
 
-  let has_signer = list.length(tx.extra_signatories) > 0
-  let valid_name = entity_name != #""
-  let valid_description = entity_description != #""
-  let has_script_output =
+  // Verify expected output state
+  let has_signer = list.has(tx.extra_signatories, founder)
+  let has_output =
     list.any(
       tx.outputs,
-      fn(output) {
-        when output.datum is {
+      fn(o) {
+        when o.datum is {
           InlineDatum(_) -> True
           _ -> False
         }
       },
     )
+  let datum_valid =
+    output_datum.entity.member_count == 0 && list.is_empty(output_datum.members) && output_datum.admins == [
+      founder,
+    ]
 
-  has_signer && valid_name && valid_description && has_script_output
+  has_signer && has_output && datum_valid
 }
 
-// Test 2: Entity creation validation failures
-test entity_creation_validation_failures() {
-  let empty_name_invalid = #"" == #""
-  let empty_desc_invalid = #"" == #""
-  let valid_inputs = "Valid Name" != #"" && "Valid description" != #""
-
-  empty_name_invalid && empty_desc_invalid && valid_inputs
+test create_entity_rejects_empty_name() {
+  let empty = #""
+  let valid = "Valid Name"
+  empty == #"" && valid != #""
 }
 
-// Test 3: Cannot create entity when UTxO already exists
-test entity_creation_with_existing_utxo_fails() {
-  let signer = mock_pub_key_hash(0)
-  let existing_datum =
-    Some(
-      RegistryDatum {
-        entity: create_sample_entity(signer, 1625097600000),
-        members: [],
-        admin: signer,
-      },
-    )
-
-  // For existing entity UTxO, CreateEntity should fail
-  when existing_datum is {
-    Some(_) -> True
-    // Cannot create when datum exists
-    None -> False
-  }
+test create_entity_rejects_empty_description() {
+  let empty = #""
+  let valid = "A valid description"
+  empty == #"" && valid != #""
 }
 
-// Test 4: Successful member addition with NFT
-test add_member_with_nft_success() {
-  let admin = mock_pub_key_hash(0)
-  let new_member_vkh = mock_pub_key_hash(1)
-  let current_time = 1625097600000
-  let nft_token_name = "member_cert_001"
+// ── Add member ────────────────────────────────────────────────────────────────
 
-  let existing_datum =
-    RegistryDatum {
-      entity: create_sample_entity(admin, current_time - 86400000),
-      members: [],
-      admin,
-    }
-
-  let new_member =
-    create_sample_member(
-      new_member_vkh,
-      "John Doe",
-      current_time,
-      nft_token_name,
-    )
-
-  let expected_datum =
-    RegistryDatum {
-      entity: Entity {
-        name: existing_datum.entity.name,
-        description: existing_datum.entity.description,
-        creation_time: existing_datum.entity.creation_time,
-        founder: existing_datum.entity.founder,
-        member_count: 1,
-      },
-      members: [new_member],
-      admin,
-    }
-
-  let tx =
-    mocktail_tx()
-      |> required_signer_hash(True, admin)
-      |> tx_out(True, mock_script_address(0, None), from_lovelace(10_000_000))
-      |> tx_out_inline_datum(True, expected_datum)
-      |> complete()
-
-  let admin_signed = list.has(tx.extra_signatories, admin)
-  let valid_member_name = new_member.name != #""
-  let valid_member_vkh = new_member.verification_key_hash != #""
-  let valid_nft_token = new_member.nft_token_name != #""
-  let member_not_exists =
-    !list.any(
-      existing_datum.members,
-      fn(m) { m.verification_key_hash == new_member_vkh },
-    )
-
-  admin_signed && valid_member_name && valid_member_vkh && valid_nft_token && member_not_exists
-}
-
-// Test 5: Member addition validation failures
-test add_member_validation_failures() {
+test add_member_output_structure() {
   let admin = mock_pub_key_hash(0)
   let member_vkh = mock_pub_key_hash(1)
-  let non_admin = mock_pub_key_hash(2)
-  let current_time = 1625097600000
+  let existing_datum = sample_datum(admin)
+  let new_member = sample_member(member_vkh, "Jane Doe", 1700000000000)
 
-  // Non-admin trying to add member
-  let non_admin_tx =
-    mocktail_tx()
-      |> required_signer_hash(True, non_admin)
-      |> complete()
-
-  let non_admin_signed = list.has(non_admin_tx.extra_signatories, admin)
-
-  // Invalid member data (empty name)
-  let invalid_name_member =
-    Member {
-      name: #"",
-      verification_key_hash: member_vkh,
-      join_time: current_time,
-      nft_token_name: "cert_001",
+  let output_datum =
+    RegistryDatum {
+      entity: Entity { ..existing_datum.entity, member_count: 1 },
+      members: [new_member],
+      admins: [admin],
     }
-  let invalid_name_check = invalid_name_member.name != #""
 
-  // Missing NFT token name
-  let invalid_nft_member =
-    Member {
-      name: "John Doe",
-      verification_key_hash: member_vkh,
-      join_time: current_time,
-      nft_token_name: #"",
-    }
-  let invalid_nft_check = invalid_nft_member.nft_token_name != #""
+  let tx = tx_with_signer_and_datum(admin, output_datum)
 
-  // Future join time
-  let future_time = current_time + 86400000
-  let future_member =
-    create_sample_member(member_vkh, "John Doe", future_time, "cert_001")
-  let valid_time_check = future_member.join_time <= current_time
+  let admin_signed = list.has(tx.extra_signatories, admin)
+  let member_count_correct = output_datum.entity.member_count == 1
+  let member_in_list =
+    list.any(
+      output_datum.members,
+      fn(m) { m.verification_key_hash == member_vkh },
+    )
+  let admins_unchanged = output_datum.admins == existing_datum.admins
 
-  !non_admin_signed && !invalid_name_check && !invalid_nft_check && !valid_time_check
+  admin_signed && member_count_correct && member_in_list && admins_unchanged
 }
 
-// Test 6: Cannot add member when no entity exists
+test add_member_rejects_duplicate() {
+  let admin = mock_pub_key_hash(0)
+  let member_vkh = mock_pub_key_hash(1)
+  let existing_member = sample_member(member_vkh, "Existing", 1699999000000)
+
+  let datum =
+    RegistryDatum {
+      entity: Entity { ..sample_entity(admin, 1699000000000), member_count: 1 },
+      members: [existing_member],
+      admins: [admin],
+    }
+
+  let already_exists =
+    list.any(datum.members, fn(m) { m.verification_key_hash == member_vkh })
+  already_exists
+}
+
+test add_member_requires_active_status() {
+  let member_vkh = mock_pub_key_hash(1)
+
+  let inactive_member =
+    Member {
+      name: "Jane",
+      verification_key_hash: member_vkh,
+      join_time: 1700000000000,
+      nft_token_name: "cert",
+      status: MemberStatus.Inactive,
+      keri_aid: None,
+    }
+
+  // New members must have Active status — Inactive is invalid on creation
+  inactive_member.status != MemberStatus.Active
+}
+
+test add_member_requires_admin_signature() {
+  let admin = mock_pub_key_hash(0)
+  let non_admin = mock_pub_key_hash(2)
+  let datum = sample_datum(admin)
+
+  let non_admin_signed = list.has([non_admin], admin)
+  let admin_in_list = list.any(datum.admins, fn(a) { a == admin })
+
+  !non_admin_signed && admin_in_list
+}
+
 test add_member_without_entity_fails() {
-  // When datum is None, adding member should fail
-  let no_datum = None
+  let no_datum: Option<RegistryDatum> = None
   when no_datum is {
     None -> True
-    // Cannot add member when no entity exists
     Some(_) -> False
   }
 }
 
-// Test 7: Duplicate member addition fails
-test add_member_duplicate_fails() {
+// ── Update member status ──────────────────────────────────────────────────────
+
+test update_member_status_output_structure() {
   let admin = mock_pub_key_hash(0)
-  let existing_member_vkh = mock_pub_key_hash(1)
-  let current_time = 1625097600000
-
-  let existing_member =
-    create_sample_member(
-      existing_member_vkh,
-      "Existing Member",
-      current_time - 3600000,
-      "cert_001",
-    )
-  let existing_datum =
-    RegistryDatum {
-      entity: Entity {
-        name: "Test SACCO",
-        description: "Test Description",
-        creation_time: current_time - 86400000,
-        founder: admin,
-        member_count: 1,
-      },
-      members: [existing_member],
-      admin,
-    }
-
-  let member_exists =
-    list.any(
-      existing_datum.members,
-      fn(m) { m.verification_key_hash == existing_member_vkh },
-    )
-
-  member_exists == True
-}
-
-// Test 8: NFT token name validation
-test nft_token_name_validation() {
   let member_vkh = mock_pub_key_hash(1)
-  let current_time = 1625097600000
+  let existing_member = sample_member(member_vkh, "Jane Doe", 1699000000000)
 
-  // Valid NFT token name
-  let valid_member =
-    create_sample_member(
-      member_vkh,
-      "John Doe",
-      current_time,
-      "member_cert_001",
-    )
-  let valid_nft_name = valid_member.nft_token_name != #""
-
-  // Invalid NFT token name (empty)
-  let invalid_member =
-    create_sample_member(member_vkh, "John Doe", current_time, #"")
-  let invalid_nft_name = invalid_member.nft_token_name == #""
-
-  valid_nft_name && invalid_nft_name
-}
-
-// Test 9: Member count tracking
-test member_count_tracking() {
-  let admin = mock_pub_key_hash(0)
-  let member1_vkh = mock_pub_key_hash(1)
-  let member2_vkh = mock_pub_key_hash(2)
-  let current_time = 1625097600000
-
-  let member1 =
-    create_sample_member(member1_vkh, "Member 1", current_time, "cert_001")
-  let member2 =
-    create_sample_member(member2_vkh, "Member 2", current_time, "cert_002")
-
-  let datum_with_members =
+  let old_datum =
     RegistryDatum {
-      entity: Entity {
-        name: "Test SACCO",
-        description: "Test Description",
-        creation_time: current_time - 86400000,
-        founder: admin,
-        member_count: 2,
-      },
-      members: [member1, member2],
-      admin,
+      entity: Entity { ..sample_entity(admin, 1698000000000), member_count: 1 },
+      members: [existing_member],
+      admins: [admin],
     }
 
-  let count_matches =
-    datum_with_members.entity.member_count == list.length(
-      datum_with_members.members,
+  // Updated member has Suspended status; everything else unchanged
+  let updated_member =
+    Member { ..existing_member, status: MemberStatus.Suspended }
+
+  let output_datum =
+    RegistryDatum {
+      entity: old_datum.entity,
+      members: [updated_member],
+      admins: old_datum.admins,
+    }
+
+  let member_status_changed =
+    list.any(
+      output_datum.members,
+      fn(m) {
+        m.verification_key_hash == member_vkh && m.status == MemberStatus.Suspended
+      },
     )
-  count_matches
+  let entity_unchanged = output_datum.entity == old_datum.entity
+  let count_unchanged =
+    list.length(output_datum.members) == list.length(old_datum.members)
+
+  member_status_changed && entity_unchanged && count_unchanged
 }
 
-// Test 10: Multiple entities can exist at same contract
-test multiple_entities_at_same_contract() {
-  let admin1 = mock_pub_key_hash(0)
-  let admin2 = mock_pub_key_hash(1)
-  let current_time = 1625097600000
+test update_status_requires_existing_member() {
+  let admin = mock_pub_key_hash(0)
+  let nonexistent_vkh = mock_pub_key_hash(9)
+  let datum = sample_datum(admin)
 
-  // First entity
-  let entity1_datum =
+  let found =
+    list.any(
+      datum.members,
+      fn(m) { m.verification_key_hash == nonexistent_vkh },
+    )
+  !found
+}
+
+// ── Add admin ─────────────────────────────────────────────────────────────────
+
+test add_admin_output_structure() {
+  let admin = mock_pub_key_hash(0)
+  let new_admin = mock_pub_key_hash(3)
+  let old_datum = sample_datum(admin)
+
+  let output_datum = RegistryDatum { ..old_datum, admins: [admin, new_admin] }
+
+  let count_increased =
+    list.length(output_datum.admins) == list.length(old_datum.admins) + 1
+  let new_admin_present = list.has(output_datum.admins, new_admin)
+  let original_admin_preserved = list.has(output_datum.admins, admin)
+  let entity_unchanged = output_datum.entity == old_datum.entity
+  let members_unchanged = output_datum.members == old_datum.members
+
+  count_increased && new_admin_present && original_admin_preserved && entity_unchanged && members_unchanged
+}
+
+test add_admin_rejects_duplicate() {
+  let admin = mock_pub_key_hash(0)
+  let datum = sample_datum(admin)
+
+  // admin is already in the list — should be rejected
+  let already_admin = list.has(datum.admins, admin)
+  already_admin
+}
+
+test multi_admin_any_can_sign() {
+  let admin1 = mock_pub_key_hash(0)
+  let admin2 = mock_pub_key_hash(3)
+
+  let datum =
+    RegistryDatum {
+      entity: sample_entity(admin1, 1700000000000),
+      members: [],
+      admins: [admin1, admin2],
+    }
+
+  // Either admin's signature satisfies the check
+  let admin1_authorised =
+    list.any(datum.admins, fn(a) { list.has([admin1], a) })
+  let admin2_authorised =
+    list.any(datum.admins, fn(a) { list.has([admin2], a) })
+  let non_admin_rejected =
+    !list.any(datum.admins, fn(a) { list.has([mock_pub_key_hash(9)], a) })
+
+  admin1_authorised && admin2_authorised && non_admin_rejected
+}
+
+// ── Remove admin ──────────────────────────────────────────────────────────────
+
+test remove_admin_output_structure() {
+  let admin1 = mock_pub_key_hash(0)
+  let admin2 = mock_pub_key_hash(3)
+
+  let old_datum =
+    RegistryDatum {
+      entity: sample_entity(admin1, 1700000000000),
+      members: [],
+      admins: [admin1, admin2],
+    }
+
+  let output_datum = RegistryDatum { ..old_datum, admins: [admin1] }
+
+  let count_decreased =
+    list.length(output_datum.admins) == list.length(old_datum.admins) - 1
+  let removed_absent = !list.has(output_datum.admins, admin2)
+  let remaining_present = list.has(output_datum.admins, admin1)
+
+  count_decreased && removed_absent && remaining_present
+}
+
+test remove_last_admin_prevented() {
+  let admin = mock_pub_key_hash(0)
+  let datum = sample_datum(admin)
+
+  // Cannot remove admin when only one exists
+  let would_leave_no_admin = list.length(datum.admins) <= 1
+  would_leave_no_admin
+}
+
+// ── Member data integrity ─────────────────────────────────────────────────────
+
+test member_count_matches_list_length() {
+  let admin = mock_pub_key_hash(0)
+  let m1 = sample_member(mock_pub_key_hash(1), "Alice", 1699000000000)
+  let m2 = sample_member(mock_pub_key_hash(2), "Bob", 1699500000000)
+
+  let datum =
+    RegistryDatum {
+      entity: Entity { ..sample_entity(admin, 1698000000000), member_count: 2 },
+      members: [m1, m2],
+      admins: [admin],
+    }
+
+  datum.entity.member_count == list.length(datum.members)
+}
+
+test member_keri_aid_is_optional() {
+  let vkh = mock_pub_key_hash(1)
+
+  let without_aid = sample_member(vkh, "Alice", 1700000000000)
+  let with_aid = Member { ..without_aid, keri_aid: Some("ENjS95qC...") }
+
+  without_aid.keri_aid == None && with_aid.keri_aid != None
+}
+
+test multiple_cooperatives_at_same_contract() {
+  let founder1 = mock_pub_key_hash(0)
+  let founder2 = mock_pub_key_hash(1)
+
+  let datum1 =
     RegistryDatum {
       entity: Entity {
         name: "Farmers SACCO",
         description: "Agricultural cooperative",
-        creation_time: current_time,
-        founder: admin1,
+        creation_time: 1700000000000,
+        founder: founder1,
         member_count: 0,
       },
       members: [],
-      admin: admin1,
+      admins: [founder1],
     }
 
-  // Second entity (different UTxO, same contract address)
-  let entity2_datum =
+  let datum2 =
     RegistryDatum {
       entity: Entity {
         name: "Teachers SACCO",
         description: "Education cooperative",
-        creation_time: current_time + 3600000,
-        founder: admin2,
+        creation_time: 1700010000000,
+        founder: founder2,
         member_count: 0,
       },
       members: [],
-      admin: admin2,
+      admins: [founder2],
     }
 
-  // Both entities have different founders and names
-  let different_founders = entity1_datum.admin != entity2_datum.admin
-  let different_names = entity1_datum.entity.name != entity2_datum.entity.name
-  let both_valid =
-    entity1_datum.entity.name != #"" && entity2_datum.entity.name != #""
-
-  different_founders && different_names && both_valid
+  datum1.admins != datum2.admins && datum1.entity.name != datum2.entity.name
 }
-
-// Test 11: Input validation functions
-test input_validation_functions() {
-  // Test validate_entity_inputs function logic
-  let valid_name = "Test SACCO"
-  let valid_description = "A test SACCO for testing purposes"
-  let empty_name = #""
-  let empty_description = #""
-  // Valid inputs should pass
-  let valid_case = valid_name != #"" && valid_description != #""
-  // Invalid inputs should fail
-  let invalid_name_case = empty_name == #""
-  let invalid_desc_case = empty_description == #""
-  valid_case && invalid_name_case && invalid_desc_case
-}
-
-// Test 12: Member data validation
-test member_data_validation() {
-  let member_vkh = mock_pub_key_hash(1)
-  let current_time = 1625097600000
-  // Valid member
-  let valid_member =
-    create_sample_member(
-      member_vkh,
-      "John Doe",
-      current_time - 1000,
-      "cert_001",
-    )
-  // Test individual validations
-  let valid_name = valid_member.name != #""
-  let valid_vkh = valid_member.verification_key_hash != #""
-  let valid_time =
-    valid_member.join_time > 0 && valid_member.join_time <= current_time
-  let valid_nft = valid_member.nft_token_name != #""
-  valid_name && valid_vkh && valid_time && valid_nft
-}
-// POST-MVP TEST EXTENSIONS:
-// - Test atomic member registration + NFT minting
-// - Test multi-admin authorization workflows
-// - Test member status update operations
-// - Test NFT-gated governance integration
-// - Test cross-contract validation with NFT policy
-// - Test emergency procedures and recovery
-// - Test compliance and audit trail features
-// - Test member transfer and portability

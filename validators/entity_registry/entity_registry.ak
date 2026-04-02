@@ -1,24 +1,35 @@
 // validators/entity_registry/entity_registry.ak
-// Entity Registry Validator - MVP with NFT Integration
-// Single contract serving multiple SACCO entities
+//
+// Entity Registry validator.
+//
+// Each cooperative has a separate UTxO at this contract address, carrying
+// its state as an inline RegistryDatum. Multiple cooperatives can coexist at
+// the same script address, each identified by its own UTxO.
+//
+// Supported actions: CreateEntity, AddMember, UpdateMemberStatus, AddAdmin, RemoveAdmin.
 
 use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
+use aiken/interval.{Finite}
 use aiken/primitive/bytearray
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
-use entity_registry/types.{Entity, Member, RegistryAction, RegistryDatum}
-
-// Helper Functions - defined before validator
-
-/// Extract current time from transaction validity range - simplified for MVP
-fn get_current_time(_tx: Transaction) -> Int {
-  // For MVP, we use a simple approach
-  // In production, you would properly extract from tx.validity_range
-  1625097600000
-  // Placeholder timestamp for MVP
+use entity_registry/types.{
+  Entity, Member, MemberStatus, RegistryAction, RegistryDatum,
 }
 
-/// Validate entity creation inputs
+// ── Time ─────────────────────────────────────────────────────────────────────
+
+/// Read the lower bound of the transaction validity range as a POSIX timestamp.
+/// Returns 0 when no finite lower bound is set (e.g. in test transactions).
+fn get_current_time(tx: Transaction) -> Int {
+  when tx.validity_range.lower_bound.bound_type is {
+    Finite(t) -> t
+    _ -> 0
+  }
+}
+
+// ── Input validation ──────────────────────────────────────────────────────────
+
 fn validate_entity_inputs(name: ByteArray, description: ByteArray) -> Bool {
   let valid_name = name != #"" && bytearray.length(name) <= 64
   let valid_description =
@@ -26,34 +37,63 @@ fn validate_entity_inputs(name: ByteArray, description: ByteArray) -> Bool {
   valid_name && valid_description
 }
 
-/// Validate member data including NFT token name
 fn validate_member_data(member: Member, current_time: Int) -> Bool {
   let valid_name = member.name != #"" && bytearray.length(member.name) <= 64
   let valid_vkh = member.verification_key_hash != #""
-  let valid_time = member.join_time > 0 && member.join_time <= current_time
-  let valid_nft_name = member.nft_token_name != #""
-  valid_name && valid_vkh && valid_time && valid_nft_name
+  // join_time upper-bound enforced only when a finite lower bound was set
+  let valid_time =
+    if current_time > 0 {
+      member.join_time > 0 && member.join_time <= current_time
+    } else {
+      member.join_time > 0
+    }
+  let valid_nft = member.nft_token_name != #""
+  // Members must be added with Active status
+  let valid_status = member.status == MemberStatus.Active
+  valid_name && valid_vkh && valid_time && valid_nft && valid_status
 }
 
-/// Validate NFT token name follows expected pattern
-fn validate_nft_token_name(
-  token_name: ByteArray,
-  _member_vkh: VerificationKeyHash,
+// ── Authorisation helpers ─────────────────────────────────────────────────────
+
+fn is_signed_by_any_admin(
+  signatories: List<VerificationKeyHash>,
+  admins: List<VerificationKeyHash>,
 ) -> Bool {
-  // For MVP: Simple validation that token name is not empty
-  // POST-MVP: Implement proper token name derivation from member VKH
-  token_name != #""
+  list.any(admins, fn(admin) { list.has(signatories, admin) })
 }
 
-/// Check if member already exists in entity
-fn member_already_exists(
-  members: List<Member>,
-  vkh: VerificationKeyHash,
-) -> Bool {
-  list.any(members, fn(member) { member.verification_key_hash == vkh })
+fn member_exists(members: List<Member>, vkh: VerificationKeyHash) -> Bool {
+  list.any(members, fn(m) { m.verification_key_hash == vkh })
 }
 
-/// Verify entity creation output is correctly formatted
+// ── Output verification ───────────────────────────────────────────────────────
+
+/// Extract the single inline-datum output, decoded as RegistryDatum.
+/// Returns None if there is not exactly one such output.
+fn get_updated_datum(outputs: List<Output>) -> Option<RegistryDatum> {
+  let inline_outputs =
+    list.filter(
+      outputs,
+      fn(o) {
+        when o.datum is {
+          InlineDatum(_) -> True
+          _ -> False
+        }
+      },
+    )
+  when inline_outputs is {
+    [output] ->
+      when output.datum is {
+        InlineDatum(data) -> {
+          expect datum: RegistryDatum = data
+          Some(datum)
+        }
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
 fn verify_create_entity_output(
   outputs: List<Output>,
   name: ByteArray,
@@ -61,99 +101,116 @@ fn verify_create_entity_output(
   founder: VerificationKeyHash,
   current_time: Int,
 ) -> Bool {
-  // Find outputs with inline datum (new entity UTxO)
-  let script_outputs =
-    list.filter(
-      outputs,
-      fn(output) {
-        when output.datum is {
-          InlineDatum(_) -> True
-          _ -> False
-        }
-      },
-    )
-  when script_outputs is {
-    [output] ->
-      when output.datum is {
-        InlineDatum(data) -> {
-          expect new_datum: RegistryDatum = data
-          // Verify entity is properly initialized
-          let entity_valid =
-            new_datum.entity.name == name && new_datum.entity.description == description && new_datum.entity.founder == founder && new_datum.entity.creation_time >= current_time && new_datum.entity.member_count == 0
-          // Verify admin is set to founder
-          let admin_valid = new_datum.admin == founder
-          // Verify members list is empty initially
-          let members_valid = list.is_empty(new_datum.members)
-          entity_valid && admin_valid && members_valid
-        }
-        _ -> False
-      }
-    _ -> False
+  when get_updated_datum(outputs) is {
+    Some(new_datum) -> {
+      let entity_valid =
+        new_datum.entity.name == name && new_datum.entity.description == description && new_datum.entity.founder == founder && new_datum.entity.creation_time >= current_time && new_datum.entity.member_count == 0
+      // Founder is the sole initial admin
+      let admins_valid = new_datum.admins == [founder]
+      let members_empty = list.is_empty(new_datum.members)
+      entity_valid && admins_valid && members_empty
+    }
+    None -> False
   }
 }
 
-/// Verify member addition output is correctly formatted
 fn verify_add_member_output(
   outputs: List<Output>,
   old_datum: RegistryDatum,
   new_member: Member,
 ) -> Bool {
-  // Find outputs with inline datum (updated entity UTxO)
-  let script_outputs =
-    list.filter(
-      outputs,
-      fn(output) {
-        when output.datum is {
-          InlineDatum(_) -> True
-          _ -> False
-        }
-      },
-    )
-  when script_outputs is {
-    [output] ->
-      when output.datum is {
-        InlineDatum(data) -> {
-          expect new_datum: RegistryDatum = data
-          // Verify entity fields remain unchanged except member_count
-          let entity_unchanged =
-            new_datum.entity.name == old_datum.entity.name && new_datum.entity.description == old_datum.entity.description && new_datum.entity.founder == old_datum.entity.founder && new_datum.entity.creation_time == old_datum.entity.creation_time && new_datum.entity.member_count == old_datum.entity.member_count + 1
-          // Verify admin remains unchanged
-          let admin_unchanged = new_datum.admin == old_datum.admin
-          // Verify all existing members are preserved
-          let existing_members_preserved =
-            list.all(
-              old_datum.members,
-              fn(old_member) {
-                list.any(
-                  new_datum.members,
-                  fn(new_member_check) { old_member == new_member_check },
-                )
-              },
-            )
-          // Verify new member is added correctly
-          let new_member_added =
-            list.any(
-              new_datum.members,
-              fn(member) {
-                member.name == new_member.name && member.verification_key_hash == new_member.verification_key_hash && member.join_time == new_member.join_time && member.nft_token_name == new_member.nft_token_name
-              },
-            )
-          // Verify member count is correct
-          let member_count_correct =
-            list.length(new_datum.members) == list.length(old_datum.members) + 1
-          entity_unchanged && admin_unchanged && existing_members_preserved && new_member_added && member_count_correct
-        }
-        _ -> False
-      }
-    _ -> False
+  when get_updated_datum(outputs) is {
+    Some(new_datum) -> {
+      let entity_unchanged =
+        new_datum.entity.name == old_datum.entity.name && new_datum.entity.description == old_datum.entity.description && new_datum.entity.founder == old_datum.entity.founder && new_datum.entity.creation_time == old_datum.entity.creation_time && new_datum.entity.member_count == old_datum.entity.member_count + 1
+      let admins_unchanged = new_datum.admins == old_datum.admins
+      let existing_preserved =
+        list.all(old_datum.members, fn(m) { list.has(new_datum.members, m) })
+      let new_member_present = list.has(new_datum.members, new_member)
+      let count_correct =
+        list.length(new_datum.members) == list.length(old_datum.members) + 1
+      entity_unchanged && admins_unchanged && existing_preserved && new_member_present && count_correct
+    }
+    None -> False
   }
 }
 
-/// Entity Registry validator - MVP Version with NFT Integration
-/// 
-/// Single contract deployment serving multiple SACCO entities.
-/// Each SACCO is a separate UTxO at this contract address.
-/// Includes basic NFT verification for member certificates.
+fn verify_update_status_output(
+  outputs: List<Output>,
+  old_datum: RegistryDatum,
+  vkh: VerificationKeyHash,
+  new_status: MemberStatus,
+) -> Bool {
+  when get_updated_datum(outputs) is {
+    Some(new_datum) -> {
+      let entity_unchanged = new_datum.entity == old_datum.entity
+      let admins_unchanged = new_datum.admins == old_datum.admins
+      let count_unchanged =
+        list.length(new_datum.members) == list.length(old_datum.members)
+      // Every old member must appear in the new list, with the target's status updated
+      let members_valid =
+        list.all(
+          old_datum.members,
+          fn(old_m) {
+            if old_m.verification_key_hash == vkh {
+              list.has(
+                new_datum.members,
+                Member { ..old_m, status: new_status },
+              )
+            } else {
+              list.has(new_datum.members, old_m)
+            }
+          },
+        )
+      entity_unchanged && admins_unchanged && count_unchanged && members_valid
+    }
+    None -> False
+  }
+}
+
+fn verify_add_admin_output(
+  outputs: List<Output>,
+  old_datum: RegistryDatum,
+  new_admin: VerificationKeyHash,
+) -> Bool {
+  when get_updated_datum(outputs) is {
+    Some(new_datum) -> {
+      let entity_unchanged = new_datum.entity == old_datum.entity
+      let members_unchanged = new_datum.members == old_datum.members
+      let count_increased =
+        list.length(new_datum.admins) == list.length(old_datum.admins) + 1
+      let new_admin_present = list.has(new_datum.admins, new_admin)
+      let old_admins_preserved =
+        list.all(old_datum.admins, fn(a) { list.has(new_datum.admins, a) })
+      entity_unchanged && members_unchanged && count_increased && new_admin_present && old_admins_preserved
+    }
+    None -> False
+  }
+}
+
+fn verify_remove_admin_output(
+  outputs: List<Output>,
+  old_datum: RegistryDatum,
+  admin_to_remove: VerificationKeyHash,
+) -> Bool {
+  when get_updated_datum(outputs) is {
+    Some(new_datum) -> {
+      let entity_unchanged = new_datum.entity == old_datum.entity
+      let members_unchanged = new_datum.members == old_datum.members
+      let count_decreased =
+        list.length(new_datum.admins) == list.length(old_datum.admins) - 1
+      let removed_absent = !list.has(new_datum.admins, admin_to_remove)
+      // All remaining admins must have been in the old list
+      let remaining_valid =
+        list.all(new_datum.admins, fn(a) { list.has(old_datum.admins, a) })
+      entity_unchanged && members_unchanged && count_decreased && removed_absent && remaining_valid
+    }
+    None -> False
+  }
+}
+
+// ── Validator ─────────────────────────────────────────────────────────────────
+
 validator entity_registry {
   spend(
     datum_opt: Option<RegistryDatum>,
@@ -165,31 +222,60 @@ validator entity_registry {
 
     when datum_opt is {
       Some(datum) ->
-        // Existing entity UTxO - member management operations
         when redeemer is {
-          RegistryAction.CreateEntity { .. } ->
-            // Cannot create entity when UTxO already exists
-            False
+          // Cannot create a new entity when a UTxO already exists at this address
+          RegistryAction.CreateEntity { .. } -> False
+
           RegistryAction.AddMember { member } -> {
-            // Validate member addition with NFT integration
-            let valid_member_data = validate_member_data(member, current_time)
-            let is_signed_by_admin = list.has(tx.extra_signatories, datum.admin)
-            let member_exists =
-              member_already_exists(datum.members, member.verification_key_hash)
-            let valid_nft_reference =
-              validate_nft_token_name(
-                member.nft_token_name,
-                member.verification_key_hash,
-              )
-            if !valid_member_data || !is_signed_by_admin || member_exists || !valid_nft_reference {
+            let valid_data = validate_member_data(member, current_time)
+            let admin_signed =
+              is_signed_by_any_admin(tx.extra_signatories, datum.admins)
+            let not_duplicate =
+              !member_exists(datum.members, member.verification_key_hash)
+            if !valid_data || !admin_signed || !not_duplicate {
               False
             } else {
               verify_add_member_output(tx.outputs, datum, member)
             }
           }
+
+          RegistryAction.UpdateMemberStatus { vkh, new_status } -> {
+            let admin_signed =
+              is_signed_by_any_admin(tx.extra_signatories, datum.admins)
+            let member_found = member_exists(datum.members, vkh)
+            if !admin_signed || !member_found {
+              False
+            } else {
+              verify_update_status_output(tx.outputs, datum, vkh, new_status)
+            }
+          }
+
+          RegistryAction.AddAdmin { vkh } -> {
+            let admin_signed =
+              is_signed_by_any_admin(tx.extra_signatories, datum.admins)
+            let not_existing = !list.has(datum.admins, vkh)
+            if !admin_signed || !not_existing {
+              False
+            } else {
+              verify_add_admin_output(tx.outputs, datum, vkh)
+            }
+          }
+
+          RegistryAction.RemoveAdmin { vkh } -> {
+            let admin_signed =
+              is_signed_by_any_admin(tx.extra_signatories, datum.admins)
+            let admin_found = list.has(datum.admins, vkh)
+            // Prevent removing the last admin, which would lock the contract
+            let not_last_admin = list.length(datum.admins) > 1
+            if !admin_signed || !admin_found || !not_last_admin {
+              False
+            } else {
+              verify_remove_admin_output(tx.outputs, datum, vkh)
+            }
+          }
         }
+
       None ->
-        // New entity creation - creates new UTxO at this contract
         when redeemer is {
           RegistryAction.CreateEntity { name, description } -> {
             let valid_inputs = validate_entity_inputs(name, description)
@@ -207,9 +293,8 @@ validator entity_registry {
               )
             }
           }
-          RegistryAction.AddMember { .. } ->
-            // Cannot add member when no entity exists
-            False
+          // All other actions require an existing entity UTxO
+          _ -> False
         }
     }
   }
@@ -218,12 +303,3 @@ validator entity_registry {
     False
   }
 }
-// POST-MVP DEVELOPMENT ROADMAP:
-// - Atomic member registration + NFT minting in single transaction
-// - Multi-admin support with role-based permissions  
-// - Member status management (Active/Inactive/Suspended)
-// - NFT-gated governance voting integration
-// - Treasury and governance contract linking
-// - Compliance features and audit trails
-// - Cross-entity member portability
-// - Emergency procedures and recovery mechanisms
